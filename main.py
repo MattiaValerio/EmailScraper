@@ -13,6 +13,7 @@ import warnings
 import argparse
 import subprocess
 import threading
+import concurrent.futures.thread as cf_thread
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
@@ -30,7 +31,7 @@ for _pkg in ("requests", "beautifulsoup4", "rich"):
     try:
         __import__(_pkg.replace("-", "_").split(".")[0])
     except ImportError:
-        print(f"  Installazione {_pkg}...")
+        # print(f"  Installazione {_pkg}...")
         _install(_pkg)
 
 import requests
@@ -573,6 +574,19 @@ def print_config(input_file, run_dir, n_urls, contact_pages, excluded, workers,
     console.print(Rule(style="dim"))
     console.print()
 
+def detach_executor_threads_from_atexit(executor: ThreadPoolExecutor):
+    """
+    Evita che l'atexit di concurrent.futures faccia join bloccante dei worker
+    dopo Ctrl+C. Usa API private in modo difensivo solo nel percorso di stop.
+    """
+    try:
+        for t in list(getattr(executor, "_threads", ())):
+            cf_thread._threads_queues.pop(t, None)
+        executor._threads.clear()
+    except Exception:
+        # In caso di differenze tra versioni Python, non bloccare l'uscita.
+        pass
+
 
 def _result_line(i: int, total: int, result: dict) -> str:
     w = len(str(total))
@@ -625,17 +639,7 @@ def print_summary(results: list, paths: dict, elapsed: float):
     console.print(Panel(t, title="[bold]Riepilogo[/bold]",
                         border_style=border, padding=(0, 2)))
 
-    # Email uniche
     all_unique = sorted({e for r in results for e in r["emails"]})
-    if all_unique:
-        console.print()
-        body = "\n".join(f"  [cyan]{e}[/cyan]" for e in all_unique)
-        console.print(Panel(
-            body,
-            title=f"[bold]Email uniche trovate  ·  {len(all_unique)}[/bold]",
-            border_style="cyan",
-            padding=(0, 1),
-        ))
 
     # File salvati
     console.print()
@@ -787,21 +791,27 @@ def main():
             for f in futures:
                 f.cancel()
             progress.update(main_task, description="[yellow]Interruzione in corso...[/yellow]")
-            raise
         finally:
             # Evita traceback in uscita: su Ctrl+C non attendere il join dei worker.
             executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
+            if interrupted:
+                detach_executor_threads_from_atexit(executor)
 
-        progress.update(main_task, description="[green]Completato[/green]")
+        if interrupted:
+            progress.update(main_task, description="[yellow]Interrotto[/yellow]")
+        else:
+            progress.update(main_task, description="[green]Completato[/green]")
 
     elapsed = time.time() - t_start
     paths = save_outputs(results, run_dir)
     print_summary(results, paths, elapsed)
 
+    if interrupted:
+        console.print("\n  [yellow]Interrotto dall'utente.[/yellow]\n")
+        return 0
+
+    return 0
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        console.print("\n\n  [yellow]Interrotto dall'utente.[/yellow]\n")
-        sys.exit(0)
+    sys.exit(main())
