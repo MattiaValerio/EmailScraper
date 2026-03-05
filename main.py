@@ -13,9 +13,13 @@ import warnings
 import argparse
 import subprocess
 import threading
+import queue
+import logging
+from typing import Any
+from types import SimpleNamespace
 import concurrent.futures.thread as cf_thread
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from urllib.parse import urljoin, urlparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +31,7 @@ def _install(pkg):
         [sys.executable, "-m", "pip", "install", pkg, "--break-system-packages", "-q"]
     )
 
-for _pkg in ("requests", "beautifulsoup4", "rich"):
+for _pkg in ("requests", "beautifulsoup4", "rich", "textual"):
     try:
         __import__(_pkg.replace("-", "_").split(".")[0])
     except ImportError:
@@ -46,6 +50,8 @@ from rich.progress import (
 from rich.panel import Panel
 from rich import box
 from rich.rule import Rule
+from rich.markup import escape
+from rich.text import Text
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Alcuni endpoint (es. sitemap/feed) possono essere XML: evitiamo warning verbosi
@@ -109,6 +115,31 @@ HEADERS = {
 TIMEOUT = 10
 
 OUTPUT_DIR = "risultati"
+TUI_SETTINGS_FILE = ".mailcrawler_tui_settings.json"
+ERROR_LOG_FILE = "scraping_errors.log"
+APP_DIR = Path(__file__).resolve().parent
+
+DEFAULT_TUI_SETTINGS = {
+    "input_file": "websites.txt",
+    "output_dir": OUTPUT_DIR,
+    "workers": 5,
+    "delay": 0.0,
+    "exclude": "",
+    "no_contact_pages": False,
+    "include_any_at_text": False,
+    "tld_whitelist": "",
+    "use_common_tlds": False,
+    "max_tld_length": 0,
+    "non_email_domain_blacklist": "",
+    "use_default_non_email_domains": False,
+    "local_prefix_blacklist": "",
+    "use_default_system_local_prefixes": False,
+    "min_local_length": 1,
+    "split_confidence": False,
+    "ignore_non_content": False,
+    "add_source_type": False,
+    "max_frequency": 0,
+}
 
 
 # ── Utility ────────────────────────────────────────────────────────────────────
@@ -407,7 +438,10 @@ def scrape_url(base_url: str, session: requests.Session,
 
 # ── I/O ────────────────────────────────────────────────────────────────────────
 def load_urls(filepath: str) -> list:
-    with open(filepath, "r", encoding="utf-8") as f:
+    file_path = Path(filepath).expanduser()
+    if not file_path.is_absolute():
+        file_path = APP_DIR / file_path
+    with open(file_path, "r", encoding="utf-8") as f:
         return [u for line in f if (u := normalize_url(line))]
 
 
@@ -434,6 +468,98 @@ def load_token_set(items: list, normalize_domain: bool = False) -> set:
 
 def load_excluded_domains(args_exclude: list) -> set:
     return load_token_set(args_exclude, normalize_domain=True)
+
+
+def parse_tokens(text: str) -> list:
+    if not text:
+        return []
+    return [tok for tok in re.split(r"[\s,;]+", text.strip()) if tok]
+
+
+def _coerce_int(value, default: int, minimum: int = 0) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, parsed)
+
+
+def _coerce_float(value, default: float, minimum: float = 0.0) -> float:
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, parsed)
+
+
+def load_tui_settings() -> dict:
+    settings = dict(DEFAULT_TUI_SETTINGS)
+    settings_path = Path(TUI_SETTINGS_FILE)
+    if not settings_path.exists():
+        return settings
+
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return settings
+
+    if not isinstance(raw, dict):
+        return settings
+
+    for key in settings:
+        if key in raw:
+            settings[key] = raw[key]
+
+    settings["workers"] = _coerce_int(settings["workers"], 5, minimum=1)
+    settings["delay"] = _coerce_float(settings["delay"], 0.0, minimum=0.0)
+    settings["max_tld_length"] = _coerce_int(settings["max_tld_length"], 0, minimum=0)
+    settings["min_local_length"] = _coerce_int(settings["min_local_length"], 1, minimum=1)
+    settings["max_frequency"] = _coerce_int(settings["max_frequency"], 0, minimum=0)
+
+    return settings
+
+
+def save_tui_settings(settings: dict) -> None:
+    payload = dict(DEFAULT_TUI_SETTINGS)
+    payload.update(settings)
+    with open(TUI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def settings_to_args(settings: dict):
+    input_file_raw = str(settings.get("input_file", "")).strip()
+    output_dir_raw = str(settings.get("output_dir", OUTPUT_DIR)).strip() or OUTPUT_DIR
+
+    input_file = Path(input_file_raw).expanduser() if input_file_raw else Path("")
+    if input_file_raw and not input_file.is_absolute():
+        input_file = APP_DIR / input_file
+
+    output_dir = Path(output_dir_raw).expanduser()
+    if not output_dir.is_absolute():
+        output_dir = APP_DIR / output_dir
+
+    return SimpleNamespace(
+        input_file=str(input_file),
+        output_dir=str(output_dir),
+        workers=_coerce_int(settings.get("workers"), 5, minimum=1),
+        delay=_coerce_float(settings.get("delay"), 0.0, minimum=0.0),
+        exclude=parse_tokens(str(settings.get("exclude", ""))),
+        no_contact_pages=bool(settings.get("no_contact_pages", False)),
+        include_any_at_text=bool(settings.get("include_any_at_text", False)),
+        tld_whitelist=parse_tokens(str(settings.get("tld_whitelist", ""))),
+        use_common_tlds=bool(settings.get("use_common_tlds", False)),
+        max_tld_length=_coerce_int(settings.get("max_tld_length"), 0, minimum=0),
+        non_email_domain_blacklist=parse_tokens(str(settings.get("non_email_domain_blacklist", ""))),
+        use_default_non_email_domains=bool(settings.get("use_default_non_email_domains", False)),
+        local_prefix_blacklist=parse_tokens(str(settings.get("local_prefix_blacklist", ""))),
+        use_default_system_local_prefixes=bool(settings.get("use_default_system_local_prefixes", False)),
+        min_local_length=_coerce_int(settings.get("min_local_length"), 1, minimum=1),
+        split_confidence=bool(settings.get("split_confidence", False)),
+        ignore_non_content=bool(settings.get("ignore_non_content", False)),
+        add_source_type=bool(settings.get("add_source_type", False)),
+        max_frequency=_coerce_int(settings.get("max_frequency"), 0, minimum=0),
+    )
 
 
 def is_excluded(url: str, excluded: set) -> bool:
@@ -535,6 +661,26 @@ def save_outputs(results: list, run_dir: Path) -> dict:
     }
 
 
+def setup_run_error_logger(run_dir: Path) -> tuple[logging.Logger, Path]:
+    """Crea un logger dedicato al run corrente per tracciare errori/exception."""
+    log_path = run_dir / ERROR_LOG_FILE
+    logger_name = f"mailcrawler.run.{run_dir.name}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.ERROR)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    )
+    logger.addHandler(file_handler)
+    return logger, log_path
+
+
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 def print_banner():
     console.print()
@@ -611,7 +757,7 @@ def _result_line(i: int, total: int, result: dict) -> str:
     return f"  {idx}  {host}  {tag}{extra}"
 
 
-def print_summary(results: list, paths: dict, elapsed: float):
+def print_summary(results: list, paths: dict, elapsed: float, error_log_path: Path | None = None):
     total      = len(results)
     with_mail  = sum(1 for r in results if r["emails"])
     no_mail    = sum(1 for r in results if r["status"] == "no_emails_found")
@@ -620,6 +766,7 @@ def print_summary(results: list, paths: dict, elapsed: float):
     tot_emails = sum(len(r["emails"]) for r in results)
 
     console.print()
+
     console.print(Rule(style="dim"))
     console.print()
 
@@ -651,12 +798,686 @@ def print_summary(results: list, paths: dict, elapsed: float):
         f"  [dim]senza email      [/dim] [bold]{paths['no_email'].name}[/bold]"
         + (f"  [yellow]({no_mail} siti)[/yellow]" if no_mail else "  [dim]vuoto[/dim]") + "\n"
         f"  [dim]errori           [/dim] [bold]{paths['errors'].name}[/bold]"
-        + (f"  [red]({errors} siti)[/red]" if errors else "  [dim]vuoto[/dim]"),
+        + (f"  [red]({errors} siti)[/red]" if errors else "  [dim]vuoto[/dim]")
+        + (f"\n  [dim]log tecnico      [/dim] [bold]{error_log_path.name}[/bold]" if error_log_path else ""),
         title=f"[bold]File salvati in  [cyan]{run_dir}[/cyan][/bold]",
         border_style="dim",
         padding=(0, 1),
     ))
     console.print()
+
+
+def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = None):
+    global OUTPUT_DIR
+
+    try:
+        urls = load_urls(args.input_file)
+    except FileNotFoundError:
+        on_event({"type": "error", "message": f"File non trovato: {args.input_file}"})
+        return
+
+    if not urls:
+        on_event({"type": "error", "message": "Nessun URL trovato nel file indicato."})
+        return
+
+    OUTPUT_DIR = args.output_dir
+    run_dir = make_run_dir()
+    error_logger, error_log_path = setup_run_error_logger(run_dir)
+
+    check_contacts = not args.no_contact_pages
+    filter_cfg = build_filter_config(args)
+    excluded = load_excluded_domains(args.exclude)
+    split_confidence = args.split_confidence
+    add_source_type = args.add_source_type
+
+    urls_to_scan = [u for u in urls if not is_excluded(u, excluded)]
+    urls_skipped = [u for u in urls if is_excluded(u, excluded)]
+
+    results = []
+    for u in urls_skipped:
+        results.append({
+            "url": u,
+            "emails": [],
+            "pages_checked": [],
+            "status": "skipped",
+            "error": "dominio escluso",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    on_event({
+        "type": "start",
+        "run_dir": str(run_dir),
+        "error_log": str(error_log_path),
+        "total": len(urls_to_scan),
+        "skipped": len(urls_skipped),
+        "workers": args.workers,
+        "input_file": args.input_file,
+    })
+
+    if not urls_to_scan:
+        elapsed = 0.0
+        paths = save_outputs(results, run_dir)
+        on_event({
+            "type": "done",
+            "results": results,
+            "paths": paths,
+            "error_log": str(error_log_path),
+            "elapsed": elapsed,
+            "interrupted": False,
+            "total_scanned": 0,
+        })
+        return
+
+    _counter = 0
+    t_start = time.time()
+    executor = ThreadPoolExecutor(max_workers=args.workers)
+    interrupted = False
+
+    def _worker(url: str) -> dict:
+        session = requests.Session()
+        try:
+            try:
+                result = scrape_url(url, session, check_contacts, filter_cfg,
+                                    split_confidence, add_source_type)
+            except Exception as exc:
+                error_logger.exception("Errore non gestito nel worker per URL %s", url)
+                result = {
+                    "url": url,
+                    "emails": [],
+                    "email_details": {},
+                    "pages_checked": [],
+                    "status": "error",
+                    "error": str(exc),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            if args.delay > 0:
+                time.sleep(args.delay)
+            return result
+        finally:
+            session.close()
+
+    futures = {executor.submit(_worker, url): url for url in urls_to_scan}
+    pending = set(futures.keys())
+
+    try:
+        while pending:
+            if stop_event and stop_event.is_set():
+                interrupted = True
+                break
+
+            done, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            for future in done:
+                url = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    error_logger.exception("Errore future.result() per URL %s", url)
+                    result = {
+                        "url": url,
+                        "emails": [],
+                        "email_details": {},
+                        "pages_checked": [],
+                        "status": "error",
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+
+                _counter += 1
+                results.append(result)
+                on_event({
+                    "type": "result",
+                    "index": _counter,
+                    "total": len(urls_to_scan),
+                    "result": result,
+                })
+
+        if interrupted:
+            for fut in pending:
+                fut.cancel()
+
+    finally:
+        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
+        if interrupted:
+            detach_executor_threads_from_atexit(executor)
+
+    elapsed = time.time() - t_start
+    paths = save_outputs(results, run_dir)
+    on_event({
+        "type": "done",
+        "results": results,
+        "paths": paths,
+        "error_log": str(error_log_path),
+        "elapsed": elapsed,
+        "interrupted": interrupted,
+        "total_scanned": len(urls_to_scan),
+    })
+
+
+def run_tui():
+    from textual.app import App, ComposeResult
+    from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+    from textual.widgets import Header, Footer, Input, Checkbox, Button, RichLog, Static, ProgressBar
+
+    class ScraperTuiApp(App):
+        TITLE = "MailCrawler TUI"
+        SUB_TITLE = "Configura, capisci cosa fa, monitora in tempo reale"
+
+        CSS = """
+        Screen {
+            background: #090d14;
+            color: #d6deeb;
+        }
+        #root { height: 1fr; }
+        #layout { height: 1fr; }
+        #settings {
+            width: 56%;
+            min-width: 64;
+            border: round #ff9f1c;
+            background: #0c111a;
+            padding: 1 2;
+        }
+        #runtime {
+            width: 44%;
+            min-width: 56;
+            border: round #2ec4b6;
+            background: #0b1320;
+            padding: 1 2;
+        }
+        .line {
+            margin: 0 0 1 0;
+        }
+        .field-label {
+            color: #9aa4b2;
+            margin: 0;
+        }
+        .title {
+            text-style: bold;
+            color: #ffbf69;
+            margin-bottom: 1;
+        }
+        .subtitle {
+            text-style: bold;
+            color: #b8c4d9;
+            margin: 1 0 0 0;
+        }
+        .hint {
+            color: #9aa4b2;
+            margin-bottom: 1;
+        }
+        #actions {
+            margin: 1 0;
+            height: auto;
+        }
+        #start {
+            width: 1fr;
+            min-width: 22;
+            margin-right: 1;
+            text-style: bold;
+        }
+        #stop {
+            width: 1fr;
+            min-width: 16;
+            text-style: bold;
+        }
+        #progress { margin: 1 0; }
+        #status {
+            margin: 0 0 1 0;
+            color: #d6deeb;
+        }
+        #preview {
+            border: round #334155;
+            background: #0b1421;
+            padding: 1;
+            margin-top: 1;
+            height: 14;
+        }
+        #kpi {
+            border: round #334155;
+            background: #0c1727;
+            padding: 1;
+            margin-bottom: 1;
+        }
+        #quick_help {
+            border: round #334155;
+            background: #0c1727;
+            padding: 1;
+            margin-top: 1;
+        }
+        Input {
+            border: round #2a3342;
+            background: #121926;
+            color: #e5ecf6;
+        }
+        Input:focus {
+            border: heavy #ff9f1c;
+            background: #161f2e;
+        }
+        """
+
+        BINDINGS = [
+            ("ctrl+c", "request_stop", "Interrompi scraping"),
+            ("f5", "start_scraping", "Start scraping"),
+            ("f6", "request_stop", "Stop scraping"),
+            ("q", "quit", "Esci"),
+        ]
+
+        def __init__(self):
+            super().__init__()
+            self._settings = load_tui_settings()
+            self._worker_thread = None
+            self._stop_event = threading.Event()
+            self._event_queue: queue.Queue[dict] = queue.Queue()
+            self._running = False
+            self._stop_requested = False
+            self._stats = {
+                "processed": 0,
+                "total": 0,
+                "with_email": 0,
+                "no_email": 0,
+                "errors": 0,
+                "skipped": 0,
+            }
+            self._preview_cache: dict[str, Any] = {
+                "path": None,
+                "total_urls": None,
+                "error": None,
+            }
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            with Container(id="root"):
+                with Horizontal(id="layout"):
+                    with VerticalScroll(id="settings"):
+                        yield Static("Configurazione scraping", classes="title")
+                        yield Static(
+                            "Compila i campi e premi START. TAB passa al campo successivo.",
+                            classes="hint",
+                        )
+
+                        yield Static("Controlli run", classes="subtitle")
+                        with Horizontal(id="actions"):
+                            yield Button("START SCRAPING  [F5]", id="start", variant="success", action="start_scraping")
+                            yield Button("STOP  [F6]", id="stop", variant="error", disabled=True, action="request_stop")
+
+                        yield Static("Input e prestazioni", classes="subtitle")
+                        yield Static("File URL (.txt)", classes="field-label")
+                        yield Input(value=str(self._settings["input_file"]), placeholder="es. websites.txt", id="input_file", classes="line")
+                        yield Static("Cartella output", classes="field-label")
+                        yield Input(value=str(self._settings["output_dir"]), placeholder="es. risultati", id="output_dir", classes="line")
+                        yield Static("Workers", classes="field-label")
+                        yield Input(value=str(self._settings["workers"]), placeholder="es. 5", id="workers", classes="line")
+                        yield Static("Delay (secondi)", classes="field-label")
+                        yield Input(value=str(self._settings["delay"]), placeholder="es. 0", id="delay", classes="line")
+
+                        yield Static("Esclusioni e filtri", classes="subtitle")
+                        yield Static("Exclude domini", classes="field-label")
+                        yield Input(value=str(self._settings["exclude"]), placeholder="spazio o virgola", id="exclude", classes="line")
+                        yield Static("TLD whitelist", classes="field-label")
+                        yield Input(value=str(self._settings["tld_whitelist"]), placeholder="it, com, org", id="tld_whitelist", classes="line")
+                        yield Static("Max lunghezza TLD (0=off)", classes="field-label")
+                        yield Input(value=str(self._settings["max_tld_length"]), placeholder="es. 6", id="max_tld_length", classes="line")
+                        yield Static("Blacklist domini non-email", classes="field-label")
+                        yield Input(value=str(self._settings["non_email_domain_blacklist"]), placeholder="es. example.com", id="non_email_domain_blacklist", classes="line")
+                        yield Static("Blacklist prefissi locali", classes="field-label")
+                        yield Input(value=str(self._settings["local_prefix_blacklist"]), placeholder="es. noreply", id="local_prefix_blacklist", classes="line")
+                        yield Static("Min local-part", classes="field-label")
+                        yield Input(value=str(self._settings["min_local_length"]), placeholder="es. 1", id="min_local_length", classes="line")
+                        yield Static("Max frequency (0=off)", classes="field-label")
+                        yield Input(value=str(self._settings["max_frequency"]), placeholder="es. 5", id="max_frequency", classes="line")
+
+                        yield Checkbox("No contact pages", value=bool(self._settings["no_contact_pages"]), id="no_contact_pages")
+                        yield Checkbox("Include any @ text", value=bool(self._settings["include_any_at_text"]), id="include_any_at_text")
+                        yield Checkbox("Use common TLDs", value=bool(self._settings["use_common_tlds"]), id="use_common_tlds")
+                        yield Checkbox("Use default non-email domains", value=bool(self._settings["use_default_non_email_domains"]), id="use_default_non_email_domains")
+                        yield Checkbox("Use default system local prefixes", value=bool(self._settings["use_default_system_local_prefixes"]), id="use_default_system_local_prefixes")
+                        yield Checkbox("Split confidence", value=bool(self._settings["split_confidence"]), id="split_confidence")
+                        yield Checkbox("Ignore non content", value=bool(self._settings["ignore_non_content"]), id="ignore_non_content")
+                        yield Checkbox("Add source type", value=bool(self._settings["add_source_type"]), id="add_source_type")
+
+                        yield Static("Anteprima configurazione", classes="subtitle")
+                        yield Static("Pronto", id="preview")
+
+                    with Vertical(id="runtime"):
+                        yield Static("Monitor esecuzione", classes="title")
+                        yield Static(
+                            "Stato in tempo reale: avanzamento, qualita risultati e percorsi output.",
+                            classes="hint",
+                        )
+                        yield Static("Pronto per l'avvio", id="status")
+                        yield Static("Completati: 0/0 | Con email: 0 | Senza email: 0 | Errori: 0 | Saltati: 0", id="kpi")
+                        yield ProgressBar(total=1, show_eta=False, id="progress")
+                        yield RichLog(id="log", wrap=True, auto_scroll=True, highlight=True)
+                        yield Static(
+                            "Scorciatoie:\n"
+                            "- Avvia: bottone Avvia\n"
+                            "- Stop sicuro: Ctrl+C o bottone Stop\n"
+                            "- Uscita: q",
+                            id="quick_help",
+                        )
+            yield Footer()
+
+        def on_mount(self) -> None:
+            # Focus immediato sul primo input: scrittura disponibile senza click.
+            self.query_one("#input_file", Input).focus()
+            # Bridge stabile thread-worker -> UI thread.
+            self.set_interval(0.1, self._drain_events)
+            self._refresh_preview()
+
+        def on_unmount(self) -> None:
+            if self._worker_thread and self._worker_thread.is_alive():
+                self._stop_event.set()
+                self._worker_thread.join(timeout=2.0)
+
+        def action_start_scraping(self) -> None:
+            self._start_run()
+
+        def _drain_events(self) -> None:
+            while True:
+                try:
+                    payload = self._event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle_worker_event(payload)
+                except Exception as exc:
+                    self.query_one("#status", Static).update(f"Errore monitor UI: {exc}")
+                    self._append_log(f"Errore monitor UI: {exc}", allow_markup=False)
+                    self._set_running_ui(False)
+                    break
+
+        def on_input_changed(self, _: Input.Changed) -> None:
+            if not self._running:
+                self._refresh_preview()
+
+        def on_checkbox_changed(self, _: Checkbox.Changed) -> None:
+            if not self._running:
+                self._refresh_preview()
+
+        def action_request_stop(self) -> None:
+            if self._running and not self._stop_requested:
+                self._stop_requested = True
+                self._stop_event.set()
+                self._append_log("[yellow]Interruzione richiesta...[/yellow]")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            # Fallback: alcune versioni/theme possono avere comportamenti diversi sui bottoni.
+            if event.button.id == "start":
+                self._start_run()
+            elif event.button.id == "stop":
+                self.action_request_stop()
+
+        def _collect_settings(self) -> dict:
+            data = {
+                "input_file": self.query_one("#input_file", Input).value.strip(),
+                "output_dir": self.query_one("#output_dir", Input).value.strip() or OUTPUT_DIR,
+                "workers": _coerce_int(self.query_one("#workers", Input).value, 5, minimum=1),
+                "delay": _coerce_float(self.query_one("#delay", Input).value, 0.0, minimum=0.0),
+                "exclude": self.query_one("#exclude", Input).value.strip(),
+                "tld_whitelist": self.query_one("#tld_whitelist", Input).value.strip(),
+                "max_tld_length": _coerce_int(self.query_one("#max_tld_length", Input).value, 0, minimum=0),
+                "non_email_domain_blacklist": self.query_one("#non_email_domain_blacklist", Input).value.strip(),
+                "local_prefix_blacklist": self.query_one("#local_prefix_blacklist", Input).value.strip(),
+                "min_local_length": _coerce_int(self.query_one("#min_local_length", Input).value, 1, minimum=1),
+                "max_frequency": _coerce_int(self.query_one("#max_frequency", Input).value, 0, minimum=0),
+                "no_contact_pages": self.query_one("#no_contact_pages", Checkbox).value,
+                "include_any_at_text": self.query_one("#include_any_at_text", Checkbox).value,
+                "use_common_tlds": self.query_one("#use_common_tlds", Checkbox).value,
+                "use_default_non_email_domains": self.query_one("#use_default_non_email_domains", Checkbox).value,
+                "use_default_system_local_prefixes": self.query_one("#use_default_system_local_prefixes", Checkbox).value,
+                "split_confidence": self.query_one("#split_confidence", Checkbox).value,
+                "ignore_non_content": self.query_one("#ignore_non_content", Checkbox).value,
+                "add_source_type": self.query_one("#add_source_type", Checkbox).value,
+            }
+            return data
+
+        def _set_running_ui(self, running: bool) -> None:
+            self._running = running
+            start_btn = self.query_one("#start", Button)
+            stop_btn = self.query_one("#stop", Button)
+            start_btn.disabled = running
+            stop_btn.disabled = not running
+            start_btn.label = "RUN IN CORSO..." if running else "START SCRAPING  [F5]"
+            stop_btn.label = "STOP  [F6]"
+            if not running:
+                self._stop_requested = False
+
+        def _append_log(self, line: str, allow_markup: bool = True) -> None:
+            log = self.query_one("#log", RichLog)
+            if allow_markup:
+                try:
+                    log.write(Text.from_markup(line))
+                    return
+                except Exception:
+                    # Fallback sicuro: mostra comunque il messaggio se il markup e invalido.
+                    pass
+            log.write(escape(str(line)))
+
+        def _estimate_urls(self, input_path: str):
+            if not input_path:
+                return 0, "input mancante"
+
+            if self._preview_cache["path"] == input_path:
+                return self._preview_cache["total_urls"], self._preview_cache["error"]
+
+            try:
+                urls = load_urls(input_path)
+                total_urls = len(urls)
+                err = "file vuoto" if total_urls == 0 else None
+            except FileNotFoundError:
+                total_urls = 0
+                err = "file non trovato"
+            except OSError:
+                total_urls = 0
+                err = "file non leggibile"
+
+            self._preview_cache["path"] = input_path
+            self._preview_cache["total_urls"] = total_urls
+            self._preview_cache["error"] = err
+            return total_urls, err
+
+        def _update_kpi(self) -> None:
+            s = self._stats
+            self.query_one("#kpi", Static).update(
+                f"Completati: {s['processed']}/{s['total']} | "
+                f"Con email: {s['with_email']} | Senza email: {s['no_email']} | "
+                f"Errori: {s['errors']} | Saltati: {s['skipped']}"
+            )
+
+        def _refresh_preview(self) -> None:
+            settings = self._collect_settings()
+            input_file = settings["input_file"]
+            total_urls, input_err = self._estimate_urls(input_file)
+
+            check_contacts = not settings["no_contact_pages"]
+            mode_contacts = "sempre" if check_contacts else "solo se homepage vuota"
+            mode_at = "permissivo" if settings["include_any_at_text"] else "rigoroso"
+
+            active_filters = []
+            if settings["use_common_tlds"] or settings["tld_whitelist"]:
+                active_filters.append("TLD whitelist")
+            if settings["max_tld_length"]:
+                active_filters.append(f"max_tld={settings['max_tld_length']}")
+            if settings["use_default_non_email_domains"] or settings["non_email_domain_blacklist"]:
+                active_filters.append("blacklist domini")
+            if settings["use_default_system_local_prefixes"] or settings["local_prefix_blacklist"]:
+                active_filters.append("blacklist prefissi")
+            if settings["min_local_length"] > 1:
+                active_filters.append(f"min_local={settings['min_local_length']}")
+            if settings["ignore_non_content"]:
+                active_filters.append("ignora script/style")
+            if settings["split_confidence"]:
+                active_filters.append("split confidence")
+            if settings["add_source_type"]:
+                active_filters.append("source_type")
+            if settings["max_frequency"]:
+                active_filters.append(f"max_freq={settings['max_frequency']}")
+
+            filters_label = ", ".join(active_filters) if active_filters else "nessun filtro avanzato"
+            warn = f"Attenzione: {input_err}" if input_err else "Input pronto"
+
+            self.query_one("#preview", Static).update(
+                "\n".join([
+                    f"Input: {input_file or '-'}",
+                    f"URL rilevati: {total_urls}",
+                    f"Output base: {settings['output_dir']}",
+                    f"Parallelismo: {settings['workers']} worker | delay {settings['delay']}s",
+                    f"Pagine contatti: {mode_contacts}",
+                    f"Interpretazione '@': {mode_at}",
+                    f"Filtri attivi: {filters_label}",
+                    warn,
+                ])
+            )
+
+        def _start_run(self) -> None:
+            if self._running:
+                return
+
+            try:
+                settings = self._collect_settings()
+                if not settings["input_file"]:
+                    self.query_one("#status", Static).update("Errore: input_file obbligatorio")
+                    self._append_log("Errore: input_file obbligatorio", allow_markup=False)
+                    return
+
+                total_urls, input_err = self._estimate_urls(settings["input_file"])
+                if input_err:
+                    self.query_one("#status", Static).update(f"Errore configurazione: {input_err}")
+                    self._append_log(
+                        f"Errore configurazione: {input_err} (input={settings['input_file']}, url_rilevati={total_urls})",
+                        allow_markup=False,
+                    )
+                    return
+
+                try:
+                    save_tui_settings(settings)
+                except OSError as exc:
+                    self.query_one("#status", Static).update(f"Errore salvataggio settings: {exc}")
+                    self._append_log(f"Errore salvataggio settings: {exc}", allow_markup=False)
+                    return
+
+                self._stop_event.clear()
+                self._stop_requested = False
+                self._set_running_ui(True)
+                progress = self.query_one("#progress", ProgressBar)
+                progress.update(total=1, progress=0)
+
+                log = self.query_one("#log", RichLog)
+                if hasattr(log, "clear"):
+                    log.clear()
+                else:
+                    self._append_log("[dim]Nuova esecuzione[/dim]")
+
+                self.query_one("#status", Static).update("Validazione configurazione e avvio scraping...")
+
+                self._stats = {
+                    "processed": 0,
+                    "total": 0,
+                    "with_email": 0,
+                    "no_email": 0,
+                    "errors": 0,
+                    "skipped": 0,
+                }
+                self._update_kpi()
+
+                args = settings_to_args(settings)
+
+                def _on_event(payload: dict):
+                    # Strategia robusta cross-versione Textual: il worker push-a solo in coda.
+                    self._event_queue.put(payload)
+
+                def _run_worker():
+                    try:
+                        scrape_with_callbacks(args, _on_event, self._stop_event)
+                    except Exception as exc:
+                        _on_event({"type": "error", "message": f"Errore worker: {exc}"})
+
+                self._worker_thread = threading.Thread(
+                    target=_run_worker,
+                    daemon=True,
+                )
+                self._worker_thread.start()
+                self._append_log("[cyan]Start ricevuto: preparo i worker...[/cyan]")
+            except Exception as exc:
+                self.query_one("#status", Static).update(f"Errore avvio: {exc}")
+                self._append_log(f"Errore avvio: {exc}", allow_markup=False)
+                self._set_running_ui(False)
+
+        def _handle_worker_event(self, payload: dict) -> None:
+            kind = payload.get("type")
+
+            if kind == "error":
+                self.query_one("#status", Static).update(f"Errore: {payload['message']}")
+                self._append_log(f"Errore: {payload['message']}", allow_markup=False)
+                self._set_running_ui(False)
+                return
+
+            if kind == "start":
+                total = payload["total"]
+                skipped = payload["skipped"]
+                self._stats["total"] = total
+                self._stats["skipped"] = skipped
+                self._update_kpi()
+                self.query_one("#progress", ProgressBar).update(total=max(1, total), progress=0)
+                self.query_one("#status", Static).update(
+                    f"In esecuzione: {total} URL da analizzare ({skipped} saltati)"
+                )
+                self._append_log(
+                    "[bold cyan]Run avviato[/bold cyan] "
+                    f"| output={payload['run_dir']} | workers={payload['workers']} | input={payload['input_file']}"
+                    f" | error_log={payload.get('error_log', '-') }"
+                )
+                return
+
+            if kind == "result":
+                idx = payload["index"]
+                total = payload["total"]
+                result = payload["result"]
+                self._stats["processed"] = idx
+                if result["status"] == "error":
+                    self._stats["errors"] += 1
+                elif result["status"] == "no_emails_found":
+                    self._stats["no_email"] += 1
+                elif result["status"] == "ok":
+                    self._stats["with_email"] += 1
+                self._update_kpi()
+                self.query_one("#progress", ProgressBar).update(progress=idx)
+                self.query_one("#status", Static).update(f"Completati {idx}/{total} URL")
+                self._append_log(_result_line(idx, total, result))
+                return
+
+            if kind == "done":
+                elapsed = payload["elapsed"]
+                interrupted = payload["interrupted"]
+                results = payload["results"]
+                paths = payload["paths"]
+                total_scanned = payload["total_scanned"]
+
+                progress = self.query_one("#progress", ProgressBar)
+                progress.update(total=max(1, total_scanned), progress=total_scanned)
+
+                with_mail = sum(1 for r in results if r["emails"])
+                errors = sum(1 for r in results if r["status"] == "error")
+                no_mail = sum(1 for r in results if r["status"] == "no_emails_found")
+                self._stats["processed"] = total_scanned
+                self._stats["with_email"] = with_mail
+                self._stats["errors"] = errors
+                self._stats["no_email"] = no_mail
+                self._update_kpi()
+
+                state = "Interrotto" if interrupted else "Completato"
+                self.query_one("#status", Static).update(
+                    f"{state} in {elapsed:.1f}s | con email={with_mail} | senza email={no_mail} | errori={errors}"
+                )
+                self._append_log(
+                    f"[green]Output salvati[/green] | {paths['json']} | {paths['all_emails']} | {paths['no_email']} | {paths['errors']}"
+                    f" | error_log={payload.get('error_log', '-') }"
+                )
+                self._set_running_ui(False)
+                self._worker_thread = None
+
+    app = ScraperTuiApp()
+    app.run()
+    return 0
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -666,8 +1487,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Scrapa email da una lista di URL in un file .txt"
     )
-    parser.add_argument("input_file",
+    parser.add_argument("input_file", nargs="?",
                         help="File .txt con un URL per riga")
+    parser.add_argument("--tui", action="store_true",
+                        help="Avvia la TUI (Textual) per configurare e monitorare lo scraping")
     parser.add_argument("--no-contact-pages", action="store_true",
                         help="Cerca le pagine contatti SOLO se la homepage non ha email")
     parser.add_argument("--delay", type=float, default=0.0,
@@ -706,6 +1529,9 @@ def main():
                         help="Scarta email ripetute >= N volte nella stessa pagina (0=disattivo)")
     args = parser.parse_args()
 
+    if args.tui or not args.input_file:
+        return run_tui()
+
     print_banner()
 
     try:
@@ -721,6 +1547,7 @@ def main():
     # Prepara output dir
     OUTPUT_DIR = args.output_dir
     run_dir = make_run_dir()
+    error_logger, error_log_path = setup_run_error_logger(run_dir)
 
     check_contacts = not args.no_contact_pages
     filter_cfg = build_filter_config(args)
@@ -763,19 +1590,47 @@ def main():
 
         def _worker(url: str) -> dict:
             session = requests.Session()
-            result = scrape_url(url, session, check_contacts, filter_cfg,
-                                split_confidence, add_source_type)
-            session.close()
-            if args.delay > 0:
-                time.sleep(args.delay)
-            return result
+            try:
+                try:
+                    result = scrape_url(url, session, check_contacts, filter_cfg,
+                                        split_confidence, add_source_type)
+                except Exception as exc:
+                    error_logger.exception("Errore non gestito nel worker CLI per URL %s", url)
+                    result = {
+                        "url": url,
+                        "emails": [],
+                        "email_details": {},
+                        "pages_checked": [],
+                        "status": "error",
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                if args.delay > 0:
+                    time.sleep(args.delay)
+                return result
+            finally:
+                session.close()
 
         executor = ThreadPoolExecutor(max_workers=args.workers)
         interrupted = False
+        futures = {}
         try:
             futures = {executor.submit(_worker, url): url for url in urls_to_scan}
             for future in as_completed(futures):
-                result = future.result()
+                url = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    error_logger.exception("Errore future.result() CLI per URL %s", url)
+                    result = {
+                        "url": url,
+                        "emails": [],
+                        "email_details": {},
+                        "pages_checked": [],
+                        "status": "error",
+                        "error": str(exc),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
                 with _print_lock:
                     _counter[0] += 1
                     n = _counter[0]
@@ -804,7 +1659,7 @@ def main():
 
     elapsed = time.time() - t_start
     paths = save_outputs(results, run_dir)
-    print_summary(results, paths, elapsed)
+    print_summary(results, paths, elapsed, error_log_path=error_log_path)
 
     if interrupted:
         console.print("\n  [yellow]Interrotto dall'utente.[/yellow]\n")

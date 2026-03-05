@@ -12,6 +12,7 @@ Cerca nei tag `mailto:`, nel testo visibile, nell'HTML grezzo, nelle email offus
   - `requests`
   - `beautifulsoup4`
   - `rich`
+  - `textual`
 
 ---
 
@@ -20,6 +21,30 @@ Cerca nei tag `mailto:`, nel testo visibile, nell'HTML grezzo, nelle email offus
 ```bash
 python main.py <input.txt> [opzioni]
 ```
+
+### Modalita TUI (Textual)
+
+Puoi avviare l'interfaccia testuale in due modi:
+
+```bash
+python main.py --tui
+```
+
+oppure senza argomenti:
+
+```bash
+python main.py
+```
+
+Nella TUI puoi:
+
+- impostare i parametri principali dello scraping da form
+- vedere un'anteprima live della configurazione (input, URL rilevati, filtri attivi)
+- avviare/interrompere il run
+- seguire progresso, KPI (con/senza email, errori, saltati) e risultati in tempo reale
+- vedere i path dei file salvati a fine esecuzione
+
+Le impostazioni vengono salvate automaticamente in `.mailcrawler_tui_settings.json` e riproposte al prossimo avvio.
 
 ### Argomenti
 

@@ -1,3 +1,5 @@
 .venv
 risultati
 websites.txt
+
+__pycache__
