@@ -1,0 +1,73 @@
+2026-03-06 08:38:28,814 | DEBUG | Inizializzazione ScraperTuiApp
+2026-03-06 08:38:28,864 | DEBUG | on_mount eseguito
+2026-03-06 08:38:38,336 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:38,336 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:38,512 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:38,512 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:38,704 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:38,704 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:38,864 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:38,865 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:39,040 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:39,040 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:39,216 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:39,216 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:39,504 | DEBUG | Interruzione richiesta dall'utente
+2026-03-06 08:38:41,743 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:41,743 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:42,128 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:42,128 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:42,368 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:42,368 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:42,544 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:42,544 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:42,720 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:42,720 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:42,912 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:42,912 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:43,184 | DEBUG | action_start_scraping invocata
+2026-03-06 08:38:43,184 | DEBUG | _start_run ignorato: run gia in corso
+2026-03-06 08:38:44,228 | DEBUG | on_unmount eseguito
+2026-03-06 08:40:27,157 | DEBUG | Inizializzazione ScraperTuiApp
+2026-03-06 08:40:27,207 | DEBUG | on_mount eseguito
+2026-03-06 08:40:36,329 | DEBUG | action_start_scraping invocata
+2026-03-06 08:40:36,329 | DEBUG | _start_run iniziato
+2026-03-06 08:40:36,331 | DEBUG | Avvio worker: input=C:\Users\mattia\Desktop\mailCrawler\websites.txt output=C:\Users\mattia\Desktop\mailCrawler\risultati workers=5
+2026-03-06 08:40:36,332 | DEBUG | Thread worker partito
+2026-03-06 08:40:36,383 | DEBUG | Evento worker ricevuto: start
+2026-03-06 08:40:36,383 | DEBUG | Gestione evento: start
+2026-03-06 08:40:41,671 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:41,671 | DEBUG | Gestione evento: result
+2026-03-06 08:40:41,937 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:41,937 | DEBUG | Gestione evento: result
+2026-03-06 08:40:41,938 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:41,938 | DEBUG | Gestione evento: result
+2026-03-06 08:40:43,508 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:43,508 | DEBUG | Gestione evento: result
+2026-03-06 08:40:45,760 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:45,760 | DEBUG | Gestione evento: result
+2026-03-06 08:40:48,553 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:48,553 | DEBUG | Gestione evento: result
+2026-03-06 08:40:49,650 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:49,650 | DEBUG | Gestione evento: result
+2026-03-06 08:40:56,034 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:56,034 | DEBUG | Gestione evento: result
+2026-03-06 08:40:56,234 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:40:56,234 | DEBUG | Gestione evento: result
+2026-03-06 08:41:03,116 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:41:03,116 | DEBUG | Gestione evento: result
+2026-03-06 08:41:07,406 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:41:07,406 | DEBUG | Gestione evento: result
+2026-03-06 08:41:10,398 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:41:10,398 | DEBUG | Gestione evento: result
+2026-03-06 08:41:17,381 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:41:17,381 | DEBUG | Gestione evento: result
+2026-03-06 08:41:18,777 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:41:18,778 | DEBUG | Gestione evento: result
+2026-03-06 08:41:19,176 | DEBUG | Evento worker ricevuto: result
+2026-03-06 08:41:19,176 | DEBUG | Gestione evento: result
+2026-03-06 08:41:20,443 | DEBUG | Interruzione richiesta dall'utente
+2026-03-06 08:41:20,577 | DEBUG | Thread worker terminato normalmente
+2026-03-06 08:41:20,672 | DEBUG | Evento worker ricevuto: done
+2026-03-06 08:41:20,672 | DEBUG | Gestione evento: done
+2026-03-06 08:41:20,673 | DEBUG | Run concluso: interrupted=True elapsed=44.23s with_email=9 no_email=4 errors=2

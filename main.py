@@ -117,6 +117,7 @@ TIMEOUT = 10
 OUTPUT_DIR = "risultati"
 TUI_SETTINGS_FILE = ".mailcrawler_tui_settings.json"
 ERROR_LOG_FILE = "scraping_errors.log"
+TUI_DEBUG_LOG_FILE = "tui_debug.log"
 APP_DIR = Path(__file__).resolve().parent
 
 DEFAULT_TUI_SETTINGS = {
@@ -681,6 +682,26 @@ def setup_run_error_logger(run_dir: Path) -> tuple[logging.Logger, Path]:
     return logger, log_path
 
 
+def setup_tui_debug_logger() -> tuple[logging.Logger, Path]:
+    """Logger persistente per diagnosticare avvio/stop e flusso eventi TUI."""
+    log_path = APP_DIR / TUI_DEBUG_LOG_FILE
+    logger_name = "mailcrawler.tui"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    )
+    logger.addHandler(file_handler)
+    return logger, log_path
+
+
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 def print_banner():
     console.print()
@@ -1063,11 +1084,13 @@ def run_tui():
 
         def __init__(self):
             super().__init__()
+            self._debug_logger, self._debug_log_path = setup_tui_debug_logger()
+            self._debug_logger.debug("Inizializzazione ScraperTuiApp")
             self._settings = load_tui_settings()
             self._worker_thread = None
             self._stop_event = threading.Event()
             self._event_queue: queue.Queue[dict] = queue.Queue()
-            self._running = False
+            self._scrape_running = False
             self._stop_requested = False
             self._stats = {
                 "processed": 0,
@@ -1157,18 +1180,22 @@ def run_tui():
             yield Footer()
 
         def on_mount(self) -> None:
+            self._debug_logger.debug("on_mount eseguito")
             # Focus immediato sul primo input: scrittura disponibile senza click.
             self.query_one("#input_file", Input).focus()
             # Bridge stabile thread-worker -> UI thread.
             self.set_interval(0.1, self._drain_events)
             self._refresh_preview()
+            self._append_log(f"[dim]Debug log: {self._debug_log_path}[/dim]")
 
         def on_unmount(self) -> None:
+            self._debug_logger.debug("on_unmount eseguito")
             if self._worker_thread and self._worker_thread.is_alive():
                 self._stop_event.set()
                 self._worker_thread.join(timeout=2.0)
 
         def action_start_scraping(self) -> None:
+            self._debug_logger.debug("action_start_scraping invocata")
             self._start_run()
 
         def _drain_events(self) -> None:
@@ -1178,29 +1205,33 @@ def run_tui():
                 except queue.Empty:
                     break
                 try:
+                    self._debug_logger.debug("Evento worker ricevuto: %s", payload.get("type"))
                     self._handle_worker_event(payload)
                 except Exception as exc:
+                    self._debug_logger.exception("Errore in _drain_events")
                     self.query_one("#status", Static).update(f"Errore monitor UI: {exc}")
                     self._append_log(f"Errore monitor UI: {exc}", allow_markup=False)
                     self._set_running_ui(False)
                     break
 
         def on_input_changed(self, _: Input.Changed) -> None:
-            if not self._running:
+            if not self._scrape_running:
                 self._refresh_preview()
 
         def on_checkbox_changed(self, _: Checkbox.Changed) -> None:
-            if not self._running:
+            if not self._scrape_running:
                 self._refresh_preview()
 
         def action_request_stop(self) -> None:
-            if self._running and not self._stop_requested:
+            if self._scrape_running and not self._stop_requested:
+                self._debug_logger.debug("Interruzione richiesta dall'utente")
                 self._stop_requested = True
                 self._stop_event.set()
                 self._append_log("[yellow]Interruzione richiesta...[/yellow]")
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             # Fallback: alcune versioni/theme possono avere comportamenti diversi sui bottoni.
+            self._debug_logger.debug("Bottone premuto: id=%s", event.button.id)
             if event.button.id == "start":
                 self._start_run()
             elif event.button.id == "stop":
@@ -1231,7 +1262,7 @@ def run_tui():
             return data
 
         def _set_running_ui(self, running: bool) -> None:
-            self._running = running
+            self._scrape_running = running
             start_btn = self.query_one("#start", Button)
             stop_btn = self.query_one("#stop", Button)
             start_btn.disabled = running
@@ -1329,18 +1360,26 @@ def run_tui():
             )
 
         def _start_run(self) -> None:
-            if self._running:
+            if self._scrape_running:
+                self._debug_logger.debug("_start_run ignorato: run gia in corso")
                 return
 
             try:
+                self._debug_logger.debug("_start_run iniziato")
                 settings = self._collect_settings()
                 if not settings["input_file"]:
+                    self._debug_logger.warning("Blocco avvio: input_file mancante")
                     self.query_one("#status", Static).update("Errore: input_file obbligatorio")
                     self._append_log("Errore: input_file obbligatorio", allow_markup=False)
                     return
 
                 total_urls, input_err = self._estimate_urls(settings["input_file"])
                 if input_err:
+                    self._debug_logger.warning(
+                        "Blocco avvio: input non valido (%s), url_rilevati=%s",
+                        input_err,
+                        total_urls,
+                    )
                     self.query_one("#status", Static).update(f"Errore configurazione: {input_err}")
                     self._append_log(
                         f"Errore configurazione: {input_err} (input={settings['input_file']}, url_rilevati={total_urls})",
@@ -1351,6 +1390,7 @@ def run_tui():
                 try:
                     save_tui_settings(settings)
                 except OSError as exc:
+                    self._debug_logger.exception("Errore salvataggio settings")
                     self.query_one("#status", Static).update(f"Errore salvataggio settings: {exc}")
                     self._append_log(f"Errore salvataggio settings: {exc}", allow_markup=False)
                     return
@@ -1380,6 +1420,12 @@ def run_tui():
                 self._update_kpi()
 
                 args = settings_to_args(settings)
+                self._debug_logger.debug(
+                    "Avvio worker: input=%s output=%s workers=%s",
+                    args.input_file,
+                    args.output_dir,
+                    args.workers,
+                )
 
                 def _on_event(payload: dict):
                     # Strategia robusta cross-versione Textual: il worker push-a solo in coda.
@@ -1387,8 +1433,11 @@ def run_tui():
 
                 def _run_worker():
                     try:
+                        self._debug_logger.debug("Thread worker partito")
                         scrape_with_callbacks(args, _on_event, self._stop_event)
+                        self._debug_logger.debug("Thread worker terminato normalmente")
                     except Exception as exc:
+                        self._debug_logger.exception("Errore nel thread worker")
                         _on_event({"type": "error", "message": f"Errore worker: {exc}"})
 
                 self._worker_thread = threading.Thread(
@@ -1398,14 +1447,17 @@ def run_tui():
                 self._worker_thread.start()
                 self._append_log("[cyan]Start ricevuto: preparo i worker...[/cyan]")
             except Exception as exc:
+                self._debug_logger.exception("Errore avvio run")
                 self.query_one("#status", Static).update(f"Errore avvio: {exc}")
                 self._append_log(f"Errore avvio: {exc}", allow_markup=False)
                 self._set_running_ui(False)
 
         def _handle_worker_event(self, payload: dict) -> None:
             kind = payload.get("type")
+            self._debug_logger.debug("Gestione evento: %s", kind)
 
             if kind == "error":
+                self._debug_logger.error("Evento errore: %s", payload.get("message"))
                 self.query_one("#status", Static).update(f"Errore: {payload['message']}")
                 self._append_log(f"Errore: {payload['message']}", allow_markup=False)
                 self._set_running_ui(False)
@@ -1471,6 +1523,14 @@ def run_tui():
                 self._append_log(
                     f"[green]Output salvati[/green] | {paths['json']} | {paths['all_emails']} | {paths['no_email']} | {paths['errors']}"
                     f" | error_log={payload.get('error_log', '-') }"
+                )
+                self._debug_logger.debug(
+                    "Run concluso: interrupted=%s elapsed=%.2fs with_email=%s no_email=%s errors=%s",
+                    interrupted,
+                    elapsed,
+                    with_mail,
+                    no_mail,
+                    errors,
                 )
                 self._set_running_ui(False)
                 self._worker_thread = None

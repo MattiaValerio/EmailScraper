@@ -1,0 +1,21 @@
+{
+  "input_file": "websites.txt",
+  "output_dir": "risultati",
+  "workers": 5,
+  "delay": 0.0,
+  "exclude": "",
+  "no_contact_pages": false,
+  "include_any_at_text": false,
+  "tld_whitelist": "",
+  "use_common_tlds": false,
+  "max_tld_length": 0,
+  "non_email_domain_blacklist": "",
+  "use_default_non_email_domains": false,
+  "local_prefix_blacklist": "",
+  "use_default_system_local_prefixes": false,
+  "min_local_length": 1,
+  "split_confidence": false,
+  "ignore_non_content": false,
+  "add_source_type": false,
+  "max_frequency": 0
+}
