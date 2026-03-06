@@ -2,7 +2,7 @@
   "input_file": "websites.txt",
   "output_dir": "risultati",
   "workers": 30,
-  "delay": 0.0,
+  "delay": 0.5,
   "exclude": "exclude.txt",
   "no_contact_pages": false,
   "include_any_at_text": false,

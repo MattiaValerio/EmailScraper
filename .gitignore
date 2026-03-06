@@ -1,7 +1,7 @@
-.venv
-risultati
-websites.txt
-
 __pycache__
 
+.venv
+results
+risultati
+websites.txt
 tui_debug.log

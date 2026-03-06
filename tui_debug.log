@@ -251,3 +251,10 @@
 2026-03-06 09:39:48,969 | DEBUG | _start_run iniziato
 2026-03-06 09:39:48,976 | DEBUG | Avvio worker: input=C:\Users\mattia\Desktop\mailCrawler\websites.txt output=C:\Users\mattia\Desktop\mailCrawler\risultati workers=30
 2026-03-06 09:39:48,989 | DEBUG | Bridge eventi processo partito
+2026-03-06 09:48:30,195 | DEBUG | Run concluso: interrupted=False elapsed=520.28s with_email=434 no_email=164 errors=95
+2026-03-06 09:50:36,576 | DEBUG | Inizializzazione ScraperTuiApp
+2026-03-06 09:50:36,629 | DEBUG | on_mount eseguito
+2026-03-06 09:51:03,444 | DEBUG | action_start_scraping invocata
+2026-03-06 09:51:03,444 | DEBUG | _start_run iniziato
+2026-03-06 09:51:03,452 | DEBUG | Avvio worker: input=C:\Users\mattia\Desktop\mailCrawler\websites.txt output=C:\Users\mattia\Desktop\mailCrawler\risultati workers=30
+2026-03-06 09:51:03,465 | DEBUG | Bridge eventi processo partito

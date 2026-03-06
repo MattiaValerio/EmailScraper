@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Email Scraper - Estrae indirizzi email da una lista di URL
-Uso: python email_scraper.py <file_urls.txt> [opzioni]
+Email Scraper - Extract email addresses from a list of URLs
+Usage: python email_scraper.py <file_urls.txt> [options]
 """
 
 import sys
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-# ── Auto-install dipendenze ────────────────────────────────────────────────────
+# ── Auto-install dependencies ─────────────────────────────────────────────────
 def _install(pkg):
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", pkg, "--break-system-packages", "-q"]
@@ -55,13 +55,13 @@ from rich.markup import escape
 from rich.text import Text
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-# Alcuni endpoint (es. sitemap/feed) possono essere XML: evitiamo warning verbosi
-# quando li analizziamo comunque con parser HTML per estrarre email dal testo.
+# Some endpoints (e.g. sitemap/feed) may be XML: suppress noisy warnings
+# when we still parse them with an HTML parser to extract emails from text.
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 console = Console()
 
-# ── Costanti ───────────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 EMAIL_REGEX = re.compile(
     r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
     re.IGNORECASE
@@ -86,7 +86,7 @@ COMMON_VALID_TLDS = {
 RELIABLE_SOURCES = {"mailto", "visible_text", "obfuscated_text"}
 UNCERTAIN_SOURCES = {"raw_html", "any_at_text"}
 
-# Pattern più permissivo per testi offuscati tipo "info [at] sito [dot] com"
+# More permissive pattern for obfuscated text like "info [at] site [dot] com"
 OBFUSCATED_REGEX = re.compile(
     r'[a-zA-Z0-9._%+\-]+'           # parte locale
     r'\s*(?:@|\[\s*at\s*\]|\(\s*at\s*\))\s*'  # @ oppure [at] o (at)
@@ -124,9 +124,9 @@ APP_DIR = Path(__file__).resolve().parent
 DEFAULT_TUI_SETTINGS = {
     "input_file": "websites.txt",
     "output_dir": OUTPUT_DIR,
-    "workers": 5,
+    "workers": 8,
     "delay": 0.0,
-    "exclude": "",
+    "exclude": "excluded.txt",
     "no_contact_pages": False,
     "include_any_at_text": False,
     "tld_whitelist": "",
@@ -144,7 +144,7 @@ DEFAULT_TUI_SETTINGS = {
 }
 
 
-# ── Utility ────────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 def normalize_url(url: str) -> str:
     url = url.strip()
     if not url or url.startswith("#"):
@@ -161,7 +161,7 @@ def short_url(url: str, max_len: int = 48) -> str:
 
 
 def normalize_obfuscated(raw: str) -> str:
-    """Normalizza email offuscate tipo 'info [at] sito [dot] com' → 'info@sito.com'"""
+    """Normalize obfuscated emails like 'info [at] site [dot] com' -> 'info@site.com'."""
     s = raw.lower()
     s = re.sub(r'\s*[\[\(]?\s*at\s*[\]\)]?\s*', '@', s)
     s = re.sub(r'\s*[\[\(]?\s*dot\s*[\]\)]?\s*', '.', s)
@@ -213,7 +213,7 @@ def email_passes_filters(email: str, cfg: dict) -> bool:
 
 
 def extract_at_tokens(text: str) -> set:
-    """Estrae token grezzi che contengono '@' (modalita permissiva)."""
+    """Extract raw tokens containing '@' (permissive mode)."""
     raw_tokens = re.findall(r"\S+@\S+", text)
     return {
         t.strip("\"'()[]{}<>,;:!?\\")
@@ -258,7 +258,7 @@ def extract_emails_from_html(html: str, cfg: dict) -> dict:
     html_to_scan = _prepare_html_for_content_only(html) if cfg["ignore_non_content"] else html
     soup = BeautifulSoup(html_to_scan, "html.parser")
 
-    # 1. Tag mailto: fonte piu affidabile
+    # 1. mailto tags: most reliable source
     for tag in soup.find_all("a", href=True):
         href = tag["href"]
         if href.lower().startswith("mailto:"):
@@ -269,16 +269,16 @@ def extract_emails_from_html(html: str, cfg: dict) -> dict:
 
     text = soup.get_text(separator=" ")
 
-    # 2. Regex standard su testo visibile e HTML
+    # 2. Standard regex on visible text and HTML
     _add_matches(EMAIL_REGEX.findall(text), "visible_text", email_sources, email_counter)
     _add_matches(EMAIL_REGEX.findall(html_to_scan), "raw_html", email_sources, email_counter)
 
-    # 3. Modalita permissiva: qualsiasi token che contiene '@'
+    # 3. Permissive mode: any token containing '@'
     if cfg["include_any_at_text"]:
         _add_matches(extract_at_tokens(text), "any_at_text", email_sources, email_counter)
         _add_matches(extract_at_tokens(html_to_scan), "any_at_text", email_sources, email_counter)
 
-    # 4. Email offuscate nel testo visibile
+    # 4. Obfuscated emails in visible text
     normalized_obf = []
     for raw in OBFUSCATED_REGEX.findall(text):
         normalized = normalize_obfuscated(raw)
@@ -345,7 +345,7 @@ def classify_email_source_type(email_domain: str, site_netloc: str) -> str:
     return "external_domain"
 
 
-# ── Scraping ───────────────────────────────────────────────────────────────────
+# ── Scraping ──────────────────────────────────────────────────────────────────
 def scrape_url(base_url: str, session: requests.Session,
                check_contact_pages: bool,
                filter_cfg: dict,
@@ -369,11 +369,11 @@ def scrape_url(base_url: str, session: requests.Session,
     parsed = urlparse(base_url)
     base_domain = f"{parsed.scheme}://{parsed.netloc}"
 
-    # Scarica homepage
+    # Fetch homepage
     html, status = fetch_page(base_url, session)
     if html is None:
         result["status"] = "error"
-        result["error"] = "Impossibile raggiungere l'URL"
+        result["error"] = "Unable to reach URL"
         return result
 
     result["pages_checked"].append({"url": base_url, "status": status})
@@ -383,8 +383,8 @@ def scrape_url(base_url: str, session: requests.Session,
     uncertain_emails.update(extracted["uncertain"])
     email_details.update(extracted["details"])
 
-    # Cerca sempre nelle pagine contatti (a prescindere da check_contact_pages)
-    # Se check_contact_pages=False cerca solo se la homepage non ha trovato nulla
+    # Always check contact pages when enabled.
+    # If check_contact_pages=False, check only when homepage has no emails.
     should_check = check_contact_pages or len(all_emails) == 0
 
     if should_check:
@@ -438,7 +438,7 @@ def scrape_url(base_url: str, session: requests.Session,
     return result
 
 
-# ── I/O ────────────────────────────────────────────────────────────────────────
+# ── I/O ───────────────────────────────────────────────────────────────────────
 def load_urls(filepath: str) -> list:
     file_path = Path(filepath).expanduser()
     if not file_path.is_absolute():
@@ -609,7 +609,7 @@ def build_filter_config(args) -> dict:
 
 
 def make_run_dir() -> Path:
-    """Crea la cartella risultati/YYYY-MM-DD_HH-MM-SS/ per questa esecuzione."""
+    """Create results/YYYY-MM-DD_HH-MM-SS/ for this run."""
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = Path(OUTPUT_DIR) / ts
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -618,12 +618,12 @@ def make_run_dir() -> Path:
 
 def save_outputs(results: list, run_dir: Path) -> dict:
     """
-    Salva nella cartella di run:
-      - output.json          → tutti i risultati
-      - no_email.txt         → siti raggiungibili ma senza email
-      - errori.txt           → siti non raggiungibili
-            - all_emails.txt       → tutte le email trovate (solo email, una per riga)
-    Restituisce un dict con i path usati.
+        Save run outputs into run directory:
+            - output.json    -> full results
+            - no_email.txt   -> reachable sites without emails
+            - errori.txt     -> unreachable/error sites
+            - all_emails.txt -> all emails found (one per line)
+        Returns a dict with generated paths.
     """
     # output.json
     json_path = run_dir / "output.json"
@@ -664,7 +664,7 @@ def save_outputs(results: list, run_dir: Path) -> dict:
 
 
 def setup_run_error_logger(run_dir: Path) -> tuple[logging.Logger, Path]:
-    """Crea un logger dedicato al run corrente per tracciare errori/exception."""
+    """Create a run-scoped logger to track errors and exceptions."""
     log_path = run_dir / ERROR_LOG_FILE
     logger_name = f"mailcrawler.run.{run_dir.name}"
     logger = logging.getLogger(logger_name)
@@ -684,7 +684,7 @@ def setup_run_error_logger(run_dir: Path) -> tuple[logging.Logger, Path]:
 
 
 def setup_tui_debug_logger() -> tuple[logging.Logger, Path]:
-    """Logger persistente per diagnosticare avvio/stop e flusso eventi TUI."""
+    """Persistent logger for TUI startup/shutdown and event flow diagnostics."""
     log_path = APP_DIR / TUI_DEBUG_LOG_FILE
     logger_name = "mailcrawler.tui"
     logger = logging.getLogger(logger_name)
@@ -703,12 +703,12 @@ def setup_tui_debug_logger() -> tuple[logging.Logger, Path]:
     return logger, log_path
 
 
-# ── UI helpers ─────────────────────────────────────────────────────────────────
+# ── UI helpers ────────────────────────────────────────────────────────────────
 def print_banner():
     console.print()
     console.print(Panel.fit(
         "[bold cyan]  Email Scraper[/bold cyan]\n"
-        "[dim]Estrae indirizzi email da una lista di URL[/dim]",
+        "[dim]Extracts email addresses from a list of URLs[/dim]",
         border_style="cyan",
         padding=(0, 6),
     ))
@@ -733,27 +733,27 @@ def print_config(input_file, run_dir, n_urls, contact_pages, excluded, workers,
     t.add_column(style="white")
     t.add_row("Input", f"[bold]{input_file}[/bold]")
     t.add_row("Output", f"[bold]{run_dir}[/bold]")
-    t.add_row("URL", f"[bold cyan]{n_urls}[/bold cyan]")
-    t.add_row("Worker", f"[bold cyan]{workers}[/bold cyan]")
-    t.add_row("Contatti", "[green]sempre[/green]" if contact_pages else "[yellow]solo se homepage vuota[/yellow]")
-    t.add_row("Domini esclusi", f"[red]{len(excluded)}[/red]" if excluded else "[dim]0[/dim]")
-    t.add_row("Filtri attivi", f"[cyan]{active_filters}[/cyan]")
-    console.print(Panel(t, title="[bold]Avvio Scraping[/bold]", border_style="dim", padding=(0, 1)))
-    console.print("[dim]Progress live: indice, URL, numero email trovate.[/dim]")
+    t.add_row("URLs", f"[bold cyan]{n_urls}[/bold cyan]")
+    t.add_row("Workers", f"[bold cyan]{workers}[/bold cyan]")
+    t.add_row("Contact pages", "[green]always[/green]" if contact_pages else "[yellow]only if homepage is empty[/yellow]")
+    t.add_row("Excluded domains", f"[red]{len(excluded)}[/red]" if excluded else "[dim]0[/dim]")
+    t.add_row("Active filters", f"[cyan]{active_filters}[/cyan]")
+    console.print(Panel(t, title="[bold]Scraping Start[/bold]", border_style="dim", padding=(0, 1)))
+    console.print("[dim]Live progress: index, URL, number of emails found.[/dim]")
     console.print(Rule(style="dim"))
     console.print()
 
 def detach_executor_threads_from_atexit(executor: ThreadPoolExecutor):
     """
-    Evita che l'atexit di concurrent.futures faccia join bloccante dei worker
-    dopo Ctrl+C. Usa API private in modo difensivo solo nel percorso di stop.
+    Prevent concurrent.futures atexit from blocking on worker joins after Ctrl+C.
+    Use private APIs defensively only during forced shutdown.
     """
     try:
         for t in list(getattr(executor, "_threads", ())):
             cf_thread._threads_queues.pop(t, None)
         executor._threads.clear()
     except Exception:
-        # In caso di differenze tra versioni Python, non bloccare l'uscita.
+        # If private internals differ across Python versions, do not block exit.
         pass
 
 
@@ -766,12 +766,12 @@ def _result_line(i: int, total: int, result: dict) -> str:
         tag   = "[on bright_black] SKIP [/on bright_black]"
         extra = f"  [dim]{result['error']}[/dim]"
     elif result["status"] == "error":
-        tag   = "[on red] ERRORE [/on red]"
+        tag   = "[on red] ERROR [/on red]"
         extra = f"  [dim red]{result['error']}[/dim red]"
     else:
         count = len(result["emails"])
         color = "green" if count > 0 else "yellow"
-        tag   = f"[on {color} black] {count} email [/on {color} black]"
+        tag   = f"[on {color} black] {count} emails [/on {color} black]"
         extra = ""
 
     return f"  {idx}  {host}  {tag}{extra}"
@@ -790,54 +790,59 @@ def print_summary(results: list, paths: dict, elapsed: float, error_log_path: Pa
     console.print(Rule(style="dim"))
     console.print()
 
-    # Tabella riepilogo
+    # Summary table
     t = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 3))
     t.add_column(justify="right", style="dim")
     t.add_column(justify="left")
-    t.add_row("URL analizzati",  f"[bold white]{total}[/bold white]")
-    t.add_row("Con email",       f"[bold green]{with_mail}[/bold green]")
-    t.add_row("Senza email",     f"[yellow]{no_mail}[/yellow]")
-    t.add_row("Saltati",         f"[dim]{skipped}[/dim]" if skipped else "[dim]0[/dim]")
-    t.add_row("Errori",          f"[red]{errors}[/red]" if errors else "[dim]0[/dim]")
-    t.add_row("Email trovate",   f"[bold cyan]{tot_emails}[/bold cyan]")
-    t.add_row("Tempo",           f"[dim]{elapsed:.1f}s[/dim]")
+    t.add_row("URLs scanned",    f"[bold white]{total}[/bold white]")
+    t.add_row("With emails",     f"[bold green]{with_mail}[/bold green]")
+    t.add_row("Without emails",  f"[yellow]{no_mail}[/yellow]")
+    t.add_row("Skipped",         f"[dim]{skipped}[/dim]" if skipped else "[dim]0[/dim]")
+    t.add_row("Errors",          f"[red]{errors}[/red]" if errors else "[dim]0[/dim]")
+    t.add_row("Emails found",    f"[bold cyan]{tot_emails}[/bold cyan]")
+    t.add_row("Elapsed",         f"[dim]{elapsed:.1f}s[/dim]")
 
     border = "green" if not errors else "yellow"
-    console.print(Panel(t, title="[bold]Riepilogo[/bold]",
+    console.print(Panel(t, title="[bold]Summary[/bold]",
                         border_style=border, padding=(0, 2)))
 
     all_unique = sorted({e for r in results for e in r["emails"]})
 
-    # File salvati
+    # Saved files
     console.print()
     run_dir = paths["dir"]
     console.print(Panel(
-        f"  [dim]output completo  [/dim] [bold]{paths['json'].name}[/bold]\n"
-        f"  [dim]tutte le email   [/dim] [bold]{paths['all_emails'].name}[/bold]"
-        + (f"  [cyan]({len(all_unique)} email)[/cyan]" if all_unique else "  [dim]vuoto[/dim]") + "\n"
-        f"  [dim]senza email      [/dim] [bold]{paths['no_email'].name}[/bold]"
-        + (f"  [yellow]({no_mail} siti)[/yellow]" if no_mail else "  [dim]vuoto[/dim]") + "\n"
-        f"  [dim]errori           [/dim] [bold]{paths['errors'].name}[/bold]"
-        + (f"  [red]({errors} siti)[/red]" if errors else "  [dim]vuoto[/dim]")
-        + (f"\n  [dim]log tecnico      [/dim] [bold]{error_log_path.name}[/bold]" if error_log_path else ""),
-        title=f"[bold]File salvati in  [cyan]{run_dir}[/cyan][/bold]",
+        f"  [dim]full output      [/dim] [bold]{paths['json'].name}[/bold]\n"
+        f"  [dim]all emails       [/dim] [bold]{paths['all_emails'].name}[/bold]"
+        + (f"  [cyan]({len(all_unique)} emails)[/cyan]" if all_unique else "  [dim]empty[/dim]") + "\n"
+        f"  [dim]without emails   [/dim] [bold]{paths['no_email'].name}[/bold]"
+        + (f"  [yellow]({no_mail} sites)[/yellow]" if no_mail else "  [dim]empty[/dim]") + "\n"
+        f"  [dim]errors           [/dim] [bold]{paths['errors'].name}[/bold]"
+        + (f"  [red]({errors} sites)[/red]" if errors else "  [dim]empty[/dim]")
+        + (f"\n  [dim]technical log    [/dim] [bold]{error_log_path.name}[/bold]" if error_log_path else ""),
+        title=f"[bold]Saved files in [cyan]{run_dir}[/cyan][/bold]",
         border_style="dim",
         padding=(0, 1),
     ))
     console.print()
 
 
-def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = None):
+def scrape_with_callbacks(
+    args,
+    on_event,
+    stop_event: threading.Event | None = None,
+    include_result_payload: bool = True,
+):
     global OUTPUT_DIR
 
     try:
         urls = load_urls(args.input_file)
     except FileNotFoundError:
-        on_event({"type": "error", "message": f"File non trovato: {args.input_file}"})
+        on_event({"type": "error", "message": f"File not found: {args.input_file}"})
         return
 
     if not urls:
-        on_event({"type": "error", "message": "Nessun URL trovato nel file indicato."})
+        on_event({"type": "error", "message": "No URLs found in the provided file."})
         return
 
     OUTPUT_DIR = args.output_dir
@@ -860,7 +865,7 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
             "emails": [],
             "pages_checked": [],
             "status": "skipped",
-            "error": "dominio escluso",
+            "error": "excluded domain",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -905,7 +910,7 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
                 result = scrape_url(url, session, check_contacts, filter_cfg,
                                     split_confidence, add_source_type)
             except Exception as exc:
-                error_logger.exception("Errore non gestito nel worker per URL %s", url)
+                error_logger.exception("Unhandled worker exception for URL %s", url)
                 result = {
                     "url": url,
                     "emails": [],
@@ -936,7 +941,7 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
                 try:
                     result = future.result()
                 except Exception as exc:
-                    error_logger.exception("Errore future.result() per URL %s", url)
+                    error_logger.exception("future.result() failed for URL %s", url)
                     result = {
                         "url": url,
                         "emails": [],
@@ -955,12 +960,19 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
                     _result_stats["no_email"] += 1
                 elif result["status"] == "ok":
                     _result_stats["with_email"] += 1
-                on_event({
+
+                event_payload = {
                     "type": "result",
                     "index": _counter,
                     "total": len(urls_to_scan),
-                    "result": result,
+                    "status": result.get("status"),
                     "stats": dict(_result_stats),
+                }
+                if include_result_payload:
+                    event_payload["result"] = result
+
+                on_event({
+                    **event_payload,
                 })
 
         if interrupted:
@@ -986,17 +998,17 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
 
 
 def _scrape_process_entry(args_dict: dict, stop_flag, event_queue) -> None:
-    """Entry-point processo separato: scraping + invio eventi verso la UI."""
+    """Separate-process entry point: scraping + event forwarding to UI."""
     args = SimpleNamespace(**args_dict)
 
     def _emit(payload: dict) -> None:
         try:
             event_queue.put(payload, block=False)
         except Exception:
-            # Se la coda IPC e piena/non disponibile non fermiamo lo scraping.
+            # If IPC queue is full/unavailable, do not stop scraping.
             pass
 
-    scrape_with_callbacks(args, _emit, stop_flag)
+    scrape_with_callbacks(args, _emit, stop_flag, include_result_payload=False)
 
 
 def run_tui():
@@ -1006,7 +1018,7 @@ def run_tui():
 
     class ScraperTuiApp(App):
         TITLE = "MailCrawler TUI"
-        SUB_TITLE = "Configura, capisci cosa fa, monitora in tempo reale"
+        SUB_TITLE = "Configure, understand behavior, monitor in real time"
 
         CSS = """
         Screen {
@@ -1121,10 +1133,10 @@ def run_tui():
         """
 
         BINDINGS = [
-            ("ctrl+c", "request_stop", "Interrompi scraping"),
+            ("ctrl+c", "request_stop", "Stop scraping"),
             ("f5", "start_scraping", "Start scraping"),
-            ("f6", "request_stop", "Stop scraping"),
-            ("q", "quit", "Esci"),
+            ("f6", "request_stop", "Request stop"),
+            ("q", "quit", "Quit"),
         ]
 
         def __init__(self):
@@ -1159,6 +1171,7 @@ def run_tui():
                 "error": None,
             }
             # Evita che il thread UI si saturi quando arrivano molti eventi in coda.
+            # Prevent UI thread overload when many events arrive.
             self._max_events_per_tick = 16
             self._last_backlog_warning_ts = 0.0
             self._last_runtime_refresh_ts = 0.0
@@ -1174,42 +1187,42 @@ def run_tui():
             with Container(id="root"):
                 with Horizontal(id="layout"):
                     with VerticalScroll(id="settings"):
-                        yield Static("Configurazione scraping", classes="title")
+                        yield Static("Scraping configuration", classes="title")
                         yield Static(
-                            "Compila i campi e premi START. TAB passa al campo successivo.",
+                            "Fill in the fields and press START. TAB moves to the next field.",
                             classes="hint",
                         )
 
-                        yield Static("Controlli run", classes="subtitle")
+                        yield Static("Run controls", classes="subtitle")
                         with Horizontal(id="actions"):
                             yield Button("START SCRAPING  [F5]", id="start", variant="success", action="start_scraping")
                             yield Button("STOP  [F6]", id="stop", variant="error", disabled=True, action="request_stop")
 
-                        yield Static("Input e prestazioni", classes="subtitle")
-                        yield Static("File URL (.txt)", classes="field-label")
-                        yield Input(value=str(self._settings["input_file"]), placeholder="es. websites.txt", id="input_file", classes="line")
-                        yield Static("Cartella output", classes="field-label")
-                        yield Input(value=str(self._settings["output_dir"]), placeholder="es. risultati", id="output_dir", classes="line")
+                        yield Static("Input and performance", classes="subtitle")
+                        yield Static("URL file (.txt)", classes="field-label")
+                        yield Input(value=str(self._settings["input_file"]), placeholder="e.g. websites.txt", id="input_file", classes="line")
+                        yield Static("Output folder", classes="field-label")
+                        yield Input(value=str(self._settings["output_dir"]), placeholder="e.g. results", id="output_dir", classes="line")
                         yield Static("Workers", classes="field-label")
-                        yield Input(value=str(self._settings["workers"]), placeholder="es. 5", id="workers", classes="line")
-                        yield Static("Delay (secondi)", classes="field-label")
-                        yield Input(value=str(self._settings["delay"]), placeholder="es. 0", id="delay", classes="line")
+                        yield Input(value=str(self._settings["workers"]), placeholder="e.g. 5", id="workers", classes="line")
+                        yield Static("Delay (seconds)", classes="field-label")
+                        yield Input(value=str(self._settings["delay"]), placeholder="e.g. 0", id="delay", classes="line")
 
-                        yield Static("Esclusioni e filtri", classes="subtitle")
-                        yield Static("Exclude domini", classes="field-label")
-                        yield Input(value=str(self._settings["exclude"]), placeholder="spazio o virgola", id="exclude", classes="line")
+                        yield Static("Exclusions and filters", classes="subtitle")
+                        yield Static("Excluded domains", classes="field-label")
+                        yield Input(value=str(self._settings["exclude"]), placeholder="space or comma", id="exclude", classes="line")
                         yield Static("TLD whitelist", classes="field-label")
                         yield Input(value=str(self._settings["tld_whitelist"]), placeholder="it, com, org", id="tld_whitelist", classes="line")
-                        yield Static("Max lunghezza TLD (0=off)", classes="field-label")
-                        yield Input(value=str(self._settings["max_tld_length"]), placeholder="es. 6", id="max_tld_length", classes="line")
-                        yield Static("Blacklist domini non-email", classes="field-label")
-                        yield Input(value=str(self._settings["non_email_domain_blacklist"]), placeholder="es. example.com", id="non_email_domain_blacklist", classes="line")
-                        yield Static("Blacklist prefissi locali", classes="field-label")
-                        yield Input(value=str(self._settings["local_prefix_blacklist"]), placeholder="es. noreply", id="local_prefix_blacklist", classes="line")
-                        yield Static("Min local-part", classes="field-label")
-                        yield Input(value=str(self._settings["min_local_length"]), placeholder="es. 1", id="min_local_length", classes="line")
+                        yield Static("Max TLD length (0=off)", classes="field-label")
+                        yield Input(value=str(self._settings["max_tld_length"]), placeholder="e.g. 6", id="max_tld_length", classes="line")
+                        yield Static("Non-email domain blacklist", classes="field-label")
+                        yield Input(value=str(self._settings["non_email_domain_blacklist"]), placeholder="e.g. example.com", id="non_email_domain_blacklist", classes="line")
+                        yield Static("Local-part prefix blacklist", classes="field-label")
+                        yield Input(value=str(self._settings["local_prefix_blacklist"]), placeholder="e.g. noreply", id="local_prefix_blacklist", classes="line")
+                        yield Static("Min local-part length", classes="field-label")
+                        yield Input(value=str(self._settings["min_local_length"]), placeholder="e.g. 1", id="min_local_length", classes="line")
                         yield Static("Max frequency (0=off)", classes="field-label")
-                        yield Input(value=str(self._settings["max_frequency"]), placeholder="es. 5", id="max_frequency", classes="line")
+                        yield Input(value=str(self._settings["max_frequency"]), placeholder="e.g. 5", id="max_frequency", classes="line")
 
                         yield Checkbox("No contact pages", value=bool(self._settings["no_contact_pages"]), id="no_contact_pages")
                         yield Checkbox("Include any @ text", value=bool(self._settings["include_any_at_text"]), id="include_any_at_text")
@@ -1220,37 +1233,37 @@ def run_tui():
                         yield Checkbox("Ignore non content", value=bool(self._settings["ignore_non_content"]), id="ignore_non_content")
                         yield Checkbox("Add source type", value=bool(self._settings["add_source_type"]), id="add_source_type")
 
-                        yield Static("Anteprima configurazione", classes="subtitle")
-                        yield Static("Pronto", id="preview")
+                        yield Static("Configuration preview", classes="subtitle")
+                        yield Static("Ready", id="preview")
 
                     with Vertical(id="runtime"):
-                        yield Static("Monitor esecuzione", classes="title")
+                        yield Static("Execution monitor", classes="title")
                         yield Static(
-                            "Stato in tempo reale: avanzamento, qualita risultati e percorsi output.",
+                            "Live status: progress, result quality, and output paths.",
                             classes="hint",
                         )
-                        yield Static("Pronto per l'avvio", id="status")
-                        yield Static("Completati: 0/0 | Con email: 0 | Senza email: 0 | Errori: 0 | Saltati: 0", id="kpi")
+                        yield Static("Ready to start", id="status")
+                        yield Static("Completed: 0/0 | With emails: 0 | Without emails: 0 | Errors: 0 | Skipped: 0", id="kpi")
                         yield ProgressBar(total=1, show_eta=False, id="progress")
-                        yield Static("Eventi run: in attesa", id="run_note")
+                        yield Static("Run events: waiting", id="run_note")
                         yield Static(
-                            "Scorciatoie:\n"
-                            "- Avvia: bottone Avvia\n"
-                            "- Stop sicuro: Ctrl+C o bottone Stop\n"
-                            "- Uscita: q",
+                            "Shortcuts:\n"
+                            "- Start: Start button\n"
+                            "- Safe stop: Ctrl+C or Stop button\n"
+                            "- Quit: q",
                             id="quick_help",
                         )
             yield Footer()
 
         def on_mount(self) -> None:
             self._debug_logger.debug("on_mount eseguito")
-            # Focus immediato sul primo input: scrittura disponibile senza click.
+            # Immediate focus on first input: typing works without clicking.
             self.query_one("#input_file", Input).focus()
-            # Bridge stabile thread-worker -> UI thread.
+            # Stable bridge from worker thread/process to UI thread.
             self.set_interval(0.15, self._drain_events)
             self.set_interval(self._counter_refresh_interval, self._refresh_runtime_counters)
             self._refresh_preview()
-            self._append_log("Monitor compatto attivo")
+            self._append_log("Compact monitor active")
 
         def on_unmount(self) -> None:
             self._debug_logger.debug("on_unmount eseguito")
@@ -1279,13 +1292,13 @@ def run_tui():
                     self._handle_worker_event(payload)
                     control_processed += 1
                 except Exception as exc:
-                    self._debug_logger.exception("Errore in _drain_events")
-                    self.query_one("#status", Static).update(f"Errore monitor UI: {exc}")
-                    self._append_log(f"Errore monitor UI: {exc}", allow_markup=False)
+                    self._debug_logger.exception("Error in _drain_events")
+                    self.query_one("#status", Static).update(f"UI monitor error: {exc}")
+                    self._append_log(f"UI monitor error: {exc}", allow_markup=False)
                     self._set_running_ui(False)
                     break
 
-            # Se la queue risultati e piena, teniamo solo l'ultimo evento coalesciato.
+            # If the result queue is full, keep only the latest coalesced event.
             with self._queue_state_lock:
                 coalesced = self._coalesced_result_event
                 dropped = self._dropped_result_events
@@ -1309,26 +1322,26 @@ def run_tui():
                     self._handle_worker_event(payload)
                     processed += 1
                 except Exception as exc:
-                    self._debug_logger.exception("Errore in _drain_events")
-                    self.query_one("#status", Static).update(f"Errore monitor UI: {exc}")
-                    self._append_log(f"Errore monitor UI: {exc}", allow_markup=False)
+                    self._debug_logger.exception("Error in _drain_events")
+                    self.query_one("#status", Static).update(f"UI monitor error: {exc}")
+                    self._append_log(f"UI monitor error: {exc}", allow_markup=False)
                     self._set_running_ui(False)
                     break
 
             now = time.time()
             if dropped > 0 and (now - self._last_drop_warning_ts) > 2.0:
                 self._last_drop_warning_ts = now
-                self._debug_logger.warning("Eventi result coalesciati: %s", dropped)
-                self._append_log(f"[yellow]UI sotto carico: coalesciati {dropped} eventi[/yellow]")
+                self._debug_logger.warning("Coalesced result events: %s", dropped)
+                self._append_log(f"[yellow]UI under load: coalesced {dropped} events[/yellow]")
 
-            # Se la coda resta piena, lasciamo respiro al loop UI e continuiamo al tick successivo.
+            # If queue stays full, give UI loop breathing room and continue next tick.
             backlog = self._result_queue.qsize()
             with self._queue_state_lock:
                 if self._coalesced_result_event is not None:
                     backlog += 1
             self._ui_backlog = backlog
 
-            # Adattamento dinamico: con backlog alto riduciamo render/log per mantenere reattivita.
+            # Dynamic adaptation: with high backlog reduce render/log frequency to keep UI responsive.
             if self._ui_backlog > 600:
                 self._ui_refresh_min_interval = 0.8
                 self._ui_refresh_min_delta = 12
@@ -1349,10 +1362,10 @@ def run_tui():
             now = time.time()
             if self._ui_backlog > 200 and (now - self._last_backlog_warning_ts) > 2.0:
                 self._last_backlog_warning_ts = now
-                self._debug_logger.warning("Backlog eventi UI elevato: %s", self._ui_backlog)
+                self._debug_logger.warning("High UI event backlog: %s", self._ui_backlog)
 
         def _should_log_result_line(self, index: int, total: int) -> bool:
-            # Su run molto grandi, campioniamo il log live per mantenere reattivita.
+            # On very large runs, sample live logs to keep responsiveness.
             if total <= 40:
                 return True
             if index <= 20 or index == total:
@@ -1383,12 +1396,12 @@ def run_tui():
             self._update_kpi()
 
             ui_load = (
-                "alta" if self._ui_backlog > 250 else
-                "media" if self._ui_backlog > 80 else
-                "bassa"
+                "high" if self._ui_backlog > 250 else
+                "medium" if self._ui_backlog > 80 else
+                "low"
             )
             self.query_one("#status", Static).update(
-                f"Completati {processed}/{self._stats.get('total', 0)} URL | UI load: {ui_load}"
+                f"Completed {processed}/{self._stats.get('total', 0)} URLs | UI load: {ui_load}"
             )
 
         def on_input_changed(self, _: Input.Changed) -> None:
@@ -1401,16 +1414,16 @@ def run_tui():
 
         def action_request_stop(self) -> None:
             if self._scrape_running and not self._stop_requested:
-                self._debug_logger.debug("Interruzione richiesta dall'utente")
+                self._debug_logger.debug("Stop requested by user")
                 self._stop_requested = True
                 self._stop_event.set()
                 if self._process_stop_event is not None:
                     self._process_stop_event.set()
-                self._append_log("[yellow]Interruzione richiesta...[/yellow]")
+                self._append_log("[yellow]Stop requested...[/yellow]")
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
-            # Fallback: alcune versioni/theme possono avere comportamenti diversi sui bottoni.
-            self._debug_logger.debug("Bottone premuto: id=%s", event.button.id)
+            # Fallback: some versions/themes can handle button events differently.
+            self._debug_logger.debug("Button pressed: id=%s", event.button.id)
             if event.button.id == "start":
                 self._start_run()
             elif event.button.id == "stop":
@@ -1469,13 +1482,13 @@ def run_tui():
             try:
                 urls = load_urls(input_path)
                 total_urls = len(urls)
-                err = "file vuoto" if total_urls == 0 else None
+                err = "empty file" if total_urls == 0 else None
             except FileNotFoundError:
                 total_urls = 0
-                err = "file non trovato"
+                err = "file not found"
             except OSError:
                 total_urls = 0
-                err = "file non leggibile"
+                err = "file not readable"
 
             self._preview_cache["path"] = input_path
             self._preview_cache["total_urls"] = total_urls
@@ -1485,9 +1498,9 @@ def run_tui():
         def _update_kpi(self) -> None:
             s = self._stats
             self.query_one("#kpi", Static).update(
-                f"Completati: {s['processed']}/{s['total']} | "
-                f"Con email: {s['with_email']} | Senza email: {s['no_email']} | "
-                f"Errori: {s['errors']} | Saltati: {s['skipped']}"
+                f"Completed: {s['processed']}/{s['total']} | "
+                f"With emails: {s['with_email']} | Without emails: {s['no_email']} | "
+                f"Errors: {s['errors']} | Skipped: {s['skipped']}"
             )
 
         def _refresh_preview(self) -> None:
@@ -1496,8 +1509,8 @@ def run_tui():
             total_urls, input_err = self._estimate_urls(input_file)
 
             check_contacts = not settings["no_contact_pages"]
-            mode_contacts = "sempre" if check_contacts else "solo se homepage vuota"
-            mode_at = "permissivo" if settings["include_any_at_text"] else "rigoroso"
+            mode_contacts = "always" if check_contacts else "only if homepage is empty"
+            mode_at = "permissive" if settings["include_any_at_text"] else "strict"
 
             active_filters = []
             if settings["use_common_tlds"] or settings["tld_whitelist"]:
@@ -1505,13 +1518,13 @@ def run_tui():
             if settings["max_tld_length"]:
                 active_filters.append(f"max_tld={settings['max_tld_length']}")
             if settings["use_default_non_email_domains"] or settings["non_email_domain_blacklist"]:
-                active_filters.append("blacklist domini")
+                active_filters.append("domain blacklist")
             if settings["use_default_system_local_prefixes"] or settings["local_prefix_blacklist"]:
-                active_filters.append("blacklist prefissi")
+                active_filters.append("prefix blacklist")
             if settings["min_local_length"] > 1:
                 active_filters.append(f"min_local={settings['min_local_length']}")
             if settings["ignore_non_content"]:
-                active_filters.append("ignora script/style")
+                active_filters.append("ignore script/style")
             if settings["split_confidence"]:
                 active_filters.append("split confidence")
             if settings["add_source_type"]:
@@ -1519,46 +1532,46 @@ def run_tui():
             if settings["max_frequency"]:
                 active_filters.append(f"max_freq={settings['max_frequency']}")
 
-            filters_label = ", ".join(active_filters) if active_filters else "nessun filtro avanzato"
-            warn = f"Attenzione: {input_err}" if input_err else "Input pronto"
+            filters_label = ", ".join(active_filters) if active_filters else "no advanced filters"
+            warn = f"Warning: {input_err}" if input_err else "Input ready"
 
             self.query_one("#preview", Static).update(
                 "\n".join([
                     f"Input: {input_file or '-'}",
-                    f"URL rilevati: {total_urls}",
-                    f"Output base: {settings['output_dir']}",
-                    f"Parallelismo: {settings['workers']} worker | delay {settings['delay']}s",
-                    f"Pagine contatti: {mode_contacts}",
-                    f"Interpretazione '@': {mode_at}",
-                    f"Filtri attivi: {filters_label}",
+                    f"Detected URLs: {total_urls}",
+                    f"Base output: {settings['output_dir']}",
+                    f"Parallelism: {settings['workers']} workers | delay {settings['delay']}s",
+                    f"Contact pages: {mode_contacts}",
+                    f"'@' interpretation: {mode_at}",
+                    f"Active filters: {filters_label}",
                     warn,
                 ])
             )
 
         def _start_run(self) -> None:
             if self._scrape_running:
-                self._debug_logger.debug("_start_run ignorato: run gia in corso")
+                self._debug_logger.debug("_start_run ignored: run already in progress")
                 return
 
             try:
-                self._debug_logger.debug("_start_run iniziato")
+                self._debug_logger.debug("_start_run started")
                 settings = self._collect_settings()
                 if not settings["input_file"]:
-                    self._debug_logger.warning("Blocco avvio: input_file mancante")
-                    self.query_one("#status", Static).update("Errore: input_file obbligatorio")
-                    self._append_log("Errore: input_file obbligatorio", allow_markup=False)
+                    self._debug_logger.warning("Start blocked: missing input_file")
+                    self.query_one("#status", Static).update("Error: input_file is required")
+                    self._append_log("Error: input_file is required", allow_markup=False)
                     return
 
                 total_urls, input_err = self._estimate_urls(settings["input_file"])
                 if input_err:
                     self._debug_logger.warning(
-                        "Blocco avvio: input non valido (%s), url_rilevati=%s",
+                        "Start blocked: invalid input (%s), detected_urls=%s",
                         input_err,
                         total_urls,
                     )
-                    self.query_one("#status", Static).update(f"Errore configurazione: {input_err}")
+                    self.query_one("#status", Static).update(f"Configuration error: {input_err}")
                     self._append_log(
-                        f"Errore configurazione: {input_err} (input={settings['input_file']}, url_rilevati={total_urls})",
+                        f"Configuration error: {input_err} (input={settings['input_file']}, detected_urls={total_urls})",
                         allow_markup=False,
                     )
                     return
@@ -1566,9 +1579,9 @@ def run_tui():
                 try:
                     save_tui_settings(settings)
                 except OSError as exc:
-                    self._debug_logger.exception("Errore salvataggio settings")
-                    self.query_one("#status", Static).update(f"Errore salvataggio settings: {exc}")
-                    self._append_log(f"Errore salvataggio settings: {exc}", allow_markup=False)
+                    self._debug_logger.exception("Settings save error")
+                    self.query_one("#status", Static).update(f"Settings save error: {exc}")
+                    self._append_log(f"Settings save error: {exc}", allow_markup=False)
                     return
 
                 self._stop_event.clear()
@@ -1577,9 +1590,9 @@ def run_tui():
                 self._process_stop_event = mp.Event()
                 progress = self.query_one("#progress", ProgressBar)
                 progress.update(total=1, progress=0)
-                self._append_log("Nuova esecuzione")
+                self._append_log("New run")
 
-                self.query_one("#status", Static).update("Validazione configurazione e avvio scraping...")
+                self.query_one("#status", Static).update("Validating configuration and starting scraping...")
 
                 self._stats = {
                     "processed": 0,
@@ -1595,11 +1608,11 @@ def run_tui():
                 self._update_kpi()
 
                 args = settings_to_args(settings)
-                # In TUI lasciamo liberta totale sui worker; avvisiamo solo su valori alti.
+                # In TUI we allow full worker freedom; only warn on high values.
                 if args.workers > 8:
-                    self._append_log("[yellow]Attenzione: con workers alti la UI puo diventare meno reattiva[/yellow]")
+                    self._append_log("[yellow]Warning: high worker count may reduce UI responsiveness[/yellow]")
                 self._debug_logger.debug(
-                    "Avvio worker: input=%s output=%s workers=%s",
+                    "Starting worker: input=%s output=%s workers=%s",
                     args.input_file,
                     args.output_dir,
                     args.workers,
@@ -1627,7 +1640,7 @@ def run_tui():
                 self._scraper_process.start()
 
                 def _bridge_events():
-                    self._debug_logger.debug("Bridge eventi processo partito")
+                    self._debug_logger.debug("Process event bridge started")
                     while True:
                         if self._stop_event.is_set() and (not self._scraper_process or not self._scraper_process.is_alive()):
                             break
@@ -1642,23 +1655,23 @@ def run_tui():
                             if self._scraper_process and not self._scraper_process.is_alive():
                                 break
                             continue
-                    self._debug_logger.debug("Bridge eventi processo terminato")
+                    self._debug_logger.debug("Process event bridge terminated")
 
                 self._bridge_thread = threading.Thread(target=_bridge_events, daemon=True)
                 self._bridge_thread.start()
             except Exception as exc:
-                self._debug_logger.exception("Errore avvio run")
-                self.query_one("#status", Static).update(f"Errore avvio: {exc}")
-                self._append_log(f"Errore avvio: {exc}", allow_markup=False)
+                self._debug_logger.exception("Run startup error")
+                self.query_one("#status", Static).update(f"Startup error: {exc}")
+                self._append_log(f"Startup error: {exc}", allow_markup=False)
                 self._set_running_ui(False)
 
         def _handle_worker_event(self, payload: dict) -> None:
             kind = payload.get("type")
 
             if kind == "error":
-                self._debug_logger.error("Evento errore: %s", payload.get("message"))
-                self.query_one("#status", Static).update(f"Errore: {payload['message']}")
-                self._append_log(f"Errore: {payload['message']}", allow_markup=False)
+                self._debug_logger.error("Error event: %s", payload.get("message"))
+                self.query_one("#status", Static).update(f"Error: {payload['message']}")
+                self._append_log(f"Error: {payload['message']}", allow_markup=False)
                 self._set_running_ui(False)
                 return
 
@@ -1670,15 +1683,14 @@ def run_tui():
                 self._update_kpi()
                 self.query_one("#progress", ProgressBar).update(total=max(1, total), progress=0)
                 self.query_one("#status", Static).update(
-                    f"In esecuzione: {total} URL da analizzare ({skipped} saltati)"
+                    f"Running: {total} URLs to scan ({skipped} skipped)"
                 )
-                self._append_log("Run avviato")
+                self._append_log("Run started")
                 return
 
             if kind == "result":
                 idx = payload["index"]
                 total = payload["total"]
-                result = payload["result"]
                 self._stats["processed"] = idx
                 self._stats["total"] = total
                 payload_stats = payload.get("stats") or {}
@@ -1687,14 +1699,18 @@ def run_tui():
                     self._stats["no_email"] = payload_stats.get("no_email", self._stats["no_email"])
                     self._stats["errors"] = payload_stats.get("errors", self._stats["errors"])
                 else:
-                    # Fallback compatibile con eventi legacy senza contatori cumulativi.
-                    if result["status"] == "error":
+                    # Backward-compatible fallback for legacy events without cumulative counters.
+                    status = payload.get("status")
+                    result = payload.get("result")
+                    if result and not status:
+                        status = result.get("status")
+                    if status == "error":
                         self._stats["errors"] += 1
-                    elif result["status"] == "no_emails_found":
+                    elif status == "no_emails_found":
                         self._stats["no_email"] += 1
-                    elif result["status"] == "ok":
+                    elif status == "ok":
                         self._stats["with_email"] += 1
-                # Modalita counter-only: nessun dettaglio per singolo risultato nel log live.
+                # Counter-only mode: no per-result details in live log.
                 return
 
             if kind == "done":
@@ -1716,9 +1732,9 @@ def run_tui():
                 self._stats["no_email"] = no_mail
                 self._update_kpi()
 
-                state = "Interrotto" if interrupted else "Completato"
+                state = "Interrupted" if interrupted else "Completed"
                 self.query_one("#status", Static).update(
-                    f"{state} in {elapsed:.1f}s | con email={with_mail} | senza email={no_mail} | errori={errors}"
+                    f"{state} in {elapsed:.1f}s | with emails={with_mail} | without emails={no_mail} | errors={errors}"
                 )
                 done_parts = [
                     str(paths["json"]),
@@ -1729,9 +1745,9 @@ def run_tui():
                 done_error_log = payload.get("error_log")
                 if done_error_log:
                     done_parts.append(f"log={done_error_log}")
-                self._append_log(f"[green]Output salvati[/green] | {' | '.join(done_parts)}")
+                self._append_log(f"[green]Output saved[/green] | {' | '.join(done_parts)}")
                 self._debug_logger.debug(
-                    "Run concluso: interrupted=%s elapsed=%.2fs with_email=%s no_email=%s errors=%s",
+                    "Run completed: interrupted=%s elapsed=%.2fs with_email=%s no_email=%s errors=%s",
                     interrupted,
                     elapsed,
                     with_mail,
@@ -1754,48 +1770,48 @@ def main():
     global OUTPUT_DIR
 
     parser = argparse.ArgumentParser(
-        description="Scrapa email da una lista di URL in un file .txt"
+        description="Scrape emails from a list of URLs in a .txt file"
     )
     parser.add_argument("input_file", nargs="?",
-                        help="File .txt con un URL per riga")
+                        help=".txt file with one URL per line")
     parser.add_argument("--tui", action="store_true",
-                        help="Avvia la TUI (Textual) per configurare e monitorare lo scraping")
+                        help="Launch the TUI (Textual) to configure and monitor scraping")
     parser.add_argument("--no-contact-pages", action="store_true",
-                        help="Cerca le pagine contatti SOLO se la homepage non ha email")
+                        help="Check contact pages ONLY if homepage has no emails")
     parser.add_argument("--delay", type=float, default=0.0,
-                        help="Pausa aggiuntiva in secondi tra richieste (default: 0)")
+                        help="Extra delay in seconds between requests (default: 0)")
     parser.add_argument("--exclude", metavar="DOMINIO", nargs="+",
-                        help="Domini da escludere: file .txt o lista diretta")
+                        help="Domains to exclude: .txt file or inline list")
     parser.add_argument("--workers", type=int, default=5,
-                        help="Numero di thread paralleli (default: 5)")
+                        help="Number of parallel threads (default: 5)")
     parser.add_argument("--output-dir", default=OUTPUT_DIR,
-                        help=f"Cartella base per i risultati (default: {OUTPUT_DIR})")
+                        help=f"Base output folder (default: {OUTPUT_DIR})")
     parser.add_argument("--include-any-at-text", action="store_true",
-                        help="Modalita permissiva: include qualsiasi testo/token che contiene '@'")
+                        help="Permissive mode: include any text/token containing '@'")
     parser.add_argument("--tld-whitelist", metavar="TLD", nargs="+",
-                        help="Whitelist TLD (es: it com org) o file .txt con un TLD per riga")
+                        help="TLD whitelist (e.g. it com org) or .txt file with one TLD per line")
     parser.add_argument("--use-common-tlds", action="store_true",
-                        help="Attiva una whitelist integrata di TLD comuni")
+                        help="Enable built-in whitelist of common TLDs")
     parser.add_argument("--max-tld-length", type=int, default=0,
-                        help="Scarta email con TLD piu lungo di N caratteri (0=disattivo)")
+                        help="Discard emails with TLD longer than N characters (0=disabled)")
     parser.add_argument("--non-email-domain-blacklist", metavar="DOMINIO", nargs="+",
-                        help="Domini da scartare nelle email (es: example.com), o file .txt")
+                        help="Email domains to discard (e.g. example.com), or .txt file")
     parser.add_argument("--use-default-non-email-domains", action="store_true",
-                        help="Attiva blacklist domini noti non-email (example.com, schema.org, ...)")
-    parser.add_argument("--local-prefix-blacklist", metavar="PREFISSO", nargs="+",
-                        help="Prefissi local-part da scartare (es: noreply postmaster), o file .txt")
+                        help="Enable blacklist for known non-email domains (example.com, schema.org, ...)")
+    parser.add_argument("--local-prefix-blacklist", metavar="PREFIX", nargs="+",
+                        help="Local-part prefixes to discard (e.g. noreply postmaster), or .txt file")
     parser.add_argument("--use-default-system-local-prefixes", action="store_true",
-                        help="Attiva blacklist prefissi di sistema (noreply, mailer-daemon, ...)")
+                        help="Enable blacklist of system prefixes (noreply, mailer-daemon, ...)")
     parser.add_argument("--min-local-length", type=int, default=1,
-                        help="Lunghezza minima della parte locale prima della @ (default: 1)")
+                        help="Minimum local-part length before @ (default: 1)")
     parser.add_argument("--split-confidence", action="store_true",
-                        help="Salva anche emails_reliable ed emails_uncertain nel JSON")
+                        help="Also save emails_reliable and emails_uncertain in JSON")
     parser.add_argument("--ignore-non-content", action="store_true",
-                        help="Ignora script/style/meta/commenti e attributi data-* durante l'estrazione")
+                        help="Ignore script/style/meta/comments and data-* attributes during extraction")
     parser.add_argument("--add-source-type", action="store_true",
-                        help="Aggiunge source_type e domain_distribution nel JSON")
+                        help="Add source_type and domain_distribution to JSON")
     parser.add_argument("--max-frequency", type=int, default=0,
-                        help="Scarta email ripetute >= N volte nella stessa pagina (0=disattivo)")
+                        help="Discard emails repeated >= N times on the same page (0=disabled)")
     args = parser.parse_args()
 
     if args.tui or not args.input_file:
@@ -1806,14 +1822,14 @@ def main():
     try:
         urls = load_urls(args.input_file)
     except FileNotFoundError:
-        console.print(f"[red bold]✗  File non trovato:[/red bold] {args.input_file}")
+        console.print(f"[red bold]✗  File not found:[/red bold] {args.input_file}")
         sys.exit(1)
 
     if not urls:
-        console.print("[yellow]⚠  Nessun URL trovato nel file.[/yellow]")
+        console.print("[yellow]⚠  No URLs found in the file.[/yellow]")
         sys.exit(1)
 
-    # Prepara output dir
+    # Prepare output directory
     OUTPUT_DIR = args.output_dir
     run_dir = make_run_dir()
     error_logger, error_log_path = setup_run_error_logger(run_dir)
@@ -1835,7 +1851,7 @@ def main():
     for u in urls_skipped:
         results.append({
             "url": u, "emails": [], "pages_checked": [],
-            "status": "skipped", "error": "dominio escluso",
+            "status": "skipped", "error": "excluded domain",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -1853,7 +1869,7 @@ def main():
         transient=False,
     ) as progress:
         main_task = progress.add_task(
-            f"[dim]0/{len(urls_to_scan)} completati[/dim]",
+            f"[dim]0/{len(urls_to_scan)} completed[/dim]",
             total=len(urls_to_scan)
         )
 
@@ -1864,7 +1880,7 @@ def main():
                     result = scrape_url(url, session, check_contacts, filter_cfg,
                                         split_confidence, add_source_type)
                 except Exception as exc:
-                    error_logger.exception("Errore non gestito nel worker CLI per URL %s", url)
+                    error_logger.exception("Unhandled CLI worker exception for URL %s", url)
                     result = {
                         "url": url,
                         "emails": [],
@@ -1890,7 +1906,7 @@ def main():
                 try:
                     result = future.result()
                 except Exception as exc:
-                    error_logger.exception("Errore future.result() CLI per URL %s", url)
+                    error_logger.exception("CLI future.result() failed for URL %s", url)
                     result = {
                         "url": url,
                         "emails": [],
@@ -1908,30 +1924,30 @@ def main():
                     progress.advance(main_task)
                     progress.update(
                         main_task,
-                        description=f"[dim]{n}/{len(urls_to_scan)} completati[/dim]"
+                        description=f"[dim]{n}/{len(urls_to_scan)} completed[/dim]"
                     )
         except KeyboardInterrupt:
             interrupted = True
             for f in futures:
                 f.cancel()
-            progress.update(main_task, description="[yellow]Interruzione in corso...[/yellow]")
+            progress.update(main_task, description="[yellow]Stopping...[/yellow]")
         finally:
-            # Evita traceback in uscita: su Ctrl+C non attendere il join dei worker.
+            # Avoid noisy shutdown traceback: on Ctrl+C do not wait for worker joins.
             executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
             if interrupted:
                 detach_executor_threads_from_atexit(executor)
 
         if interrupted:
-            progress.update(main_task, description="[yellow]Interrotto[/yellow]")
+            progress.update(main_task, description="[yellow]Interrupted[/yellow]")
         else:
-            progress.update(main_task, description="[green]Completato[/green]")
+            progress.update(main_task, description="[green]Completed[/green]")
 
     elapsed = time.time() - t_start
     paths = save_outputs(results, run_dir)
     print_summary(results, paths, elapsed, error_log_path=error_log_path)
 
     if interrupted:
-        console.print("\n  [yellow]Interrotto dall'utente.[/yellow]\n")
+        console.print("\n  [yellow]Interrupted by user.[/yellow]\n")
         return 0
 
     return 0
