@@ -15,6 +15,7 @@ import subprocess
 import threading
 import queue
 import logging
+import multiprocessing as mp
 from typing import Any
 from types import SimpleNamespace
 import concurrent.futures.thread as cf_thread
@@ -716,28 +717,29 @@ def print_banner():
 
 def print_config(input_file, run_dir, n_urls, contact_pages, excluded, workers,
                  filter_cfg, split_confidence, add_source_type):
+    active_filters = 0
+    active_filters += 1 if filter_cfg["include_any_at_text"] else 0
+    active_filters += 1 if filter_cfg["ignore_non_content"] else 0
+    active_filters += 1 if filter_cfg["tld_whitelist"] else 0
+    active_filters += 1 if filter_cfg["max_tld_length"] else 0
+    active_filters += 1 if filter_cfg["non_email_domain_blacklist"] else 0
+    active_filters += 1 if filter_cfg["local_prefix_blacklist"] else 0
+    active_filters += 1 if filter_cfg["max_frequency"] else 0
+    active_filters += 1 if split_confidence else 0
+    active_filters += 1 if add_source_type else 0
+
     t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     t.add_column(style="dim", justify="right")
     t.add_column(style="white")
-    t.add_row("Input",             f"[bold]{input_file}[/bold]")
-    t.add_row("Cartella output",   f"[bold]{run_dir}[/bold]")
-    t.add_row("URL da analizzare", f"[bold cyan]{n_urls}[/bold cyan]")
-    t.add_row("Pagine contatti",   "[green]sempre[/green]" if contact_pages else "[yellow]solo se homepage vuota[/yellow]")
-    t.add_row("Interpretazione @", "[yellow]permissiva (qualsiasi token con @)[/yellow]" if filter_cfg["include_any_at_text"] else "[green]rigorosa (solo email valide)[/green]")
-    t.add_row("Thread paralleli",  f"[bold cyan]{workers}[/bold cyan]")
-    t.add_row("Ignora script/style/meta", "[green]attivo[/green]" if filter_cfg["ignore_non_content"] else "[dim]disattivo[/dim]")
-    t.add_row("Whitelist TLD", f"[cyan]{len(filter_cfg['tld_whitelist'])}[/cyan]" if filter_cfg["tld_whitelist"] else "[dim]disattiva[/dim]")
-    t.add_row("Max lunghezza TLD", str(filter_cfg["max_tld_length"]) if filter_cfg["max_tld_length"] else "[dim]disattivo[/dim]")
-    t.add_row("Min local-part", f"[cyan]{filter_cfg['min_local_length']}[/cyan]")
-    t.add_row("Blacklist domini non-email", f"[red]{len(filter_cfg['non_email_domain_blacklist'])}[/red]" if filter_cfg["non_email_domain_blacklist"] else "[dim]disattiva[/dim]")
-    t.add_row("Blacklist prefissi locali", f"[red]{len(filter_cfg['local_prefix_blacklist'])}[/red]" if filter_cfg["local_prefix_blacklist"] else "[dim]disattiva[/dim]")
-    t.add_row("Soglia frequenza", f"[yellow]>= {filter_cfg['max_frequency']} scartata[/yellow]" if filter_cfg["max_frequency"] else "[dim]disattiva[/dim]")
-    t.add_row("Split affidabilita", "[green]attivo[/green]" if split_confidence else "[dim]disattivo[/dim]")
-    t.add_row("source_type nel JSON", "[green]attivo[/green]" if add_source_type else "[dim]disattivo[/dim]")
-    if excluded:
-        ex_str = "  ".join(f"[dim red]{d}[/dim red]" for d in sorted(excluded))
-        t.add_row("Domini esclusi", f"[red]{len(excluded)}[/red]  {ex_str}")
-    console.print(t)
+    t.add_row("Input", f"[bold]{input_file}[/bold]")
+    t.add_row("Output", f"[bold]{run_dir}[/bold]")
+    t.add_row("URL", f"[bold cyan]{n_urls}[/bold cyan]")
+    t.add_row("Worker", f"[bold cyan]{workers}[/bold cyan]")
+    t.add_row("Contatti", "[green]sempre[/green]" if contact_pages else "[yellow]solo se homepage vuota[/yellow]")
+    t.add_row("Domini esclusi", f"[red]{len(excluded)}[/red]" if excluded else "[dim]0[/dim]")
+    t.add_row("Filtri attivi", f"[cyan]{active_filters}[/cyan]")
+    console.print(Panel(t, title="[bold]Avvio Scraping[/bold]", border_style="dim", padding=(0, 1)))
+    console.print("[dim]Progress live: indice, URL, numero email trovate.[/dim]")
     console.print(Rule(style="dim"))
     console.print()
 
@@ -766,14 +768,11 @@ def _result_line(i: int, total: int, result: dict) -> str:
     elif result["status"] == "error":
         tag   = "[on red] ERRORE [/on red]"
         extra = f"  [dim red]{result['error']}[/dim red]"
-    elif not result["emails"]:
-        tag   = "[on yellow black] VUOTO [/on yellow black]"
-        extra = ""
     else:
         count = len(result["emails"])
-        tag   = f"[on green black] {count} email [/on green black]"
-        mails = "  ".join(f"[cyan]{e}[/cyan]" for e in result["emails"])
-        extra = f"  {mails}"
+        color = "green" if count > 0 else "yellow"
+        tag   = f"[on {color} black] {count} email [/on {color} black]"
+        extra = ""
 
     return f"  {idx}  {host}  {tag}{extra}"
 
@@ -890,6 +889,11 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
         return
 
     _counter = 0
+    _result_stats = {
+        "with_email": 0,
+        "no_email": 0,
+        "errors": 0,
+    }
     t_start = time.time()
     executor = ThreadPoolExecutor(max_workers=args.workers)
     interrupted = False
@@ -945,11 +949,18 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
 
                 _counter += 1
                 results.append(result)
+                if result["status"] == "error":
+                    _result_stats["errors"] += 1
+                elif result["status"] == "no_emails_found":
+                    _result_stats["no_email"] += 1
+                elif result["status"] == "ok":
+                    _result_stats["with_email"] += 1
                 on_event({
                     "type": "result",
                     "index": _counter,
                     "total": len(urls_to_scan),
                     "result": result,
+                    "stats": dict(_result_stats),
                 })
 
         if interrupted:
@@ -974,10 +985,24 @@ def scrape_with_callbacks(args, on_event, stop_event: threading.Event | None = N
     })
 
 
+def _scrape_process_entry(args_dict: dict, stop_flag, event_queue) -> None:
+    """Entry-point processo separato: scraping + invio eventi verso la UI."""
+    args = SimpleNamespace(**args_dict)
+
+    def _emit(payload: dict) -> None:
+        try:
+            event_queue.put(payload, block=False)
+        except Exception:
+            # Se la coda IPC e piena/non disponibile non fermiamo lo scraping.
+            pass
+
+    scrape_with_callbacks(args, _emit, stop_flag)
+
+
 def run_tui():
     from textual.app import App, ComposeResult
     from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-    from textual.widgets import Header, Footer, Input, Checkbox, Button, RichLog, Static, ProgressBar
+    from textual.widgets import Header, Footer, Input, Checkbox, Button, Static, ProgressBar
 
     class ScraperTuiApp(App):
         TITLE = "MailCrawler TUI"
@@ -1003,6 +1028,16 @@ def run_tui():
             border: round #2ec4b6;
             background: #0b1320;
             padding: 1 2;
+        }
+        * {
+            scrollbar-size-vertical: 1;
+            scrollbar-size-horizontal: 1;
+            scrollbar-background: #0b1320;
+            scrollbar-background-hover: #0f1a2c;
+            scrollbar-background-active: #15243a;
+            scrollbar-color: #2a3b53;
+            scrollbar-color-hover: #3a5070;
+            scrollbar-color-active: #4d6a94;
         }
         .line {
             margin: 0 0 1 0;
@@ -1039,6 +1074,8 @@ def run_tui():
             width: 1fr;
             min-width: 16;
             text-style: bold;
+            margin-right: 1;
+            padding: 0 2;
         }
         #progress { margin: 1 0; }
         #status {
@@ -1064,6 +1101,14 @@ def run_tui():
             padding: 1;
             margin-top: 1;
         }
+        #run_note {
+            border: round #334155;
+            background: #0c1727;
+            color: #9fb3c8;
+            padding: 0 1;
+            margin-top: 1;
+            height: 3;
+        }
         Input {
             border: round #2a3342;
             background: #121926;
@@ -1087,9 +1132,17 @@ def run_tui():
             self._debug_logger, self._debug_log_path = setup_tui_debug_logger()
             self._debug_logger.debug("Inizializzazione ScraperTuiApp")
             self._settings = load_tui_settings()
-            self._worker_thread = None
+            self._bridge_thread = None
+            self._scraper_process = None
+            self._process_stop_event = None
+            self._process_event_queue = None
             self._stop_event = threading.Event()
-            self._event_queue: queue.Queue[dict] = queue.Queue()
+            self._control_queue: queue.SimpleQueue[dict] = queue.SimpleQueue()
+            self._result_queue: queue.Queue[dict] = queue.Queue(maxsize=1200)
+            self._queue_state_lock = threading.Lock()
+            self._coalesced_result_event: dict[str, Any] | None = None
+            self._dropped_result_events = 0
+            self._last_drop_warning_ts = 0.0
             self._scrape_running = False
             self._stop_requested = False
             self._stats = {
@@ -1105,6 +1158,16 @@ def run_tui():
                 "total_urls": None,
                 "error": None,
             }
+            # Evita che il thread UI si saturi quando arrivano molti eventi in coda.
+            self._max_events_per_tick = 16
+            self._last_backlog_warning_ts = 0.0
+            self._last_runtime_refresh_ts = 0.0
+            self._last_runtime_refresh_idx = 0
+            self._ui_backlog = 0
+            self._ui_refresh_min_interval = 0.25
+            self._ui_refresh_min_delta = 3
+            self._ui_log_stride = 3
+            self._counter_refresh_interval = 0.5
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -1169,7 +1232,7 @@ def run_tui():
                         yield Static("Pronto per l'avvio", id="status")
                         yield Static("Completati: 0/0 | Con email: 0 | Senza email: 0 | Errori: 0 | Saltati: 0", id="kpi")
                         yield ProgressBar(total=1, show_eta=False, id="progress")
-                        yield RichLog(id="log", wrap=True, auto_scroll=True, highlight=True)
+                        yield Static("Eventi run: in attesa", id="run_note")
                         yield Static(
                             "Scorciatoie:\n"
                             "- Avvia: bottone Avvia\n"
@@ -1184,35 +1247,149 @@ def run_tui():
             # Focus immediato sul primo input: scrittura disponibile senza click.
             self.query_one("#input_file", Input).focus()
             # Bridge stabile thread-worker -> UI thread.
-            self.set_interval(0.1, self._drain_events)
+            self.set_interval(0.15, self._drain_events)
+            self.set_interval(self._counter_refresh_interval, self._refresh_runtime_counters)
             self._refresh_preview()
-            self._append_log(f"[dim]Debug log: {self._debug_log_path}[/dim]")
+            self._append_log("Monitor compatto attivo")
 
         def on_unmount(self) -> None:
             self._debug_logger.debug("on_unmount eseguito")
-            if self._worker_thread and self._worker_thread.is_alive():
+            if self._process_stop_event is not None:
+                self._process_stop_event.set()
+            if self._bridge_thread and self._bridge_thread.is_alive():
                 self._stop_event.set()
-                self._worker_thread.join(timeout=2.0)
+                self._bridge_thread.join(timeout=2.0)
+            if self._scraper_process and self._scraper_process.is_alive():
+                self._scraper_process.join(timeout=2.0)
+                if self._scraper_process.is_alive():
+                    self._scraper_process.terminate()
 
         def action_start_scraping(self) -> None:
             self._debug_logger.debug("action_start_scraping invocata")
             self._start_run()
 
         def _drain_events(self) -> None:
-            while True:
+            control_processed = 0
+            while control_processed < 8:
                 try:
-                    payload = self._event_queue.get_nowait()
+                    payload = self._control_queue.get_nowait()
                 except queue.Empty:
                     break
                 try:
-                    self._debug_logger.debug("Evento worker ricevuto: %s", payload.get("type"))
                     self._handle_worker_event(payload)
+                    control_processed += 1
                 except Exception as exc:
                     self._debug_logger.exception("Errore in _drain_events")
                     self.query_one("#status", Static).update(f"Errore monitor UI: {exc}")
                     self._append_log(f"Errore monitor UI: {exc}", allow_markup=False)
                     self._set_running_ui(False)
                     break
+
+            # Se la queue risultati e piena, teniamo solo l'ultimo evento coalesciato.
+            with self._queue_state_lock:
+                coalesced = self._coalesced_result_event
+                dropped = self._dropped_result_events
+                self._coalesced_result_event = None
+                self._dropped_result_events = 0
+
+            if coalesced is not None:
+                try:
+                    self._result_queue.put_nowait(coalesced)
+                except queue.Full:
+                    with self._queue_state_lock:
+                        self._coalesced_result_event = coalesced
+
+            processed = 0
+            while processed < self._max_events_per_tick:
+                try:
+                    payload = self._result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle_worker_event(payload)
+                    processed += 1
+                except Exception as exc:
+                    self._debug_logger.exception("Errore in _drain_events")
+                    self.query_one("#status", Static).update(f"Errore monitor UI: {exc}")
+                    self._append_log(f"Errore monitor UI: {exc}", allow_markup=False)
+                    self._set_running_ui(False)
+                    break
+
+            now = time.time()
+            if dropped > 0 and (now - self._last_drop_warning_ts) > 2.0:
+                self._last_drop_warning_ts = now
+                self._debug_logger.warning("Eventi result coalesciati: %s", dropped)
+                self._append_log(f"[yellow]UI sotto carico: coalesciati {dropped} eventi[/yellow]")
+
+            # Se la coda resta piena, lasciamo respiro al loop UI e continuiamo al tick successivo.
+            backlog = self._result_queue.qsize()
+            with self._queue_state_lock:
+                if self._coalesced_result_event is not None:
+                    backlog += 1
+            self._ui_backlog = backlog
+
+            # Adattamento dinamico: con backlog alto riduciamo render/log per mantenere reattivita.
+            if self._ui_backlog > 600:
+                self._ui_refresh_min_interval = 0.8
+                self._ui_refresh_min_delta = 12
+                self._ui_log_stride = 20
+            elif self._ui_backlog > 250:
+                self._ui_refresh_min_interval = 0.5
+                self._ui_refresh_min_delta = 8
+                self._ui_log_stride = 10
+            elif self._ui_backlog > 80:
+                self._ui_refresh_min_interval = 0.35
+                self._ui_refresh_min_delta = 5
+                self._ui_log_stride = 6
+            else:
+                self._ui_refresh_min_interval = 0.25
+                self._ui_refresh_min_delta = 3
+                self._ui_log_stride = 3
+
+            now = time.time()
+            if self._ui_backlog > 200 and (now - self._last_backlog_warning_ts) > 2.0:
+                self._last_backlog_warning_ts = now
+                self._debug_logger.warning("Backlog eventi UI elevato: %s", self._ui_backlog)
+
+        def _should_log_result_line(self, index: int, total: int) -> bool:
+            # Su run molto grandi, campioniamo il log live per mantenere reattivita.
+            if total <= 40:
+                return True
+            if index <= 20 or index == total:
+                return True
+            return index % max(1, self._ui_log_stride) == 0
+
+        def _should_refresh_runtime_widgets(self, index: int, total: int) -> bool:
+            if index >= total:
+                return True
+            now = time.time()
+            if (index - self._last_runtime_refresh_idx) >= self._ui_refresh_min_delta:
+                self._last_runtime_refresh_idx = index
+                self._last_runtime_refresh_ts = now
+                return True
+            if (now - self._last_runtime_refresh_ts) >= self._ui_refresh_min_interval:
+                self._last_runtime_refresh_idx = index
+                self._last_runtime_refresh_ts = now
+                return True
+            return False
+
+        def _refresh_runtime_counters(self) -> None:
+            if not self._scrape_running:
+                return
+
+            total = max(1, self._stats.get("total", 0))
+            processed = min(self._stats.get("processed", 0), total)
+            self.query_one("#progress", ProgressBar).update(progress=processed)
+            self._update_kpi()
+
+            ui_load = (
+                "alta" if self._ui_backlog > 250 else
+                "media" if self._ui_backlog > 80 else
+                "bassa"
+            )
+            self.query_one("#status", Static).update(
+                f"Completati {processed}/{self._stats.get('total', 0)} URL | UI load: {ui_load}"
+            )
 
         def on_input_changed(self, _: Input.Changed) -> None:
             if not self._scrape_running:
@@ -1227,6 +1404,8 @@ def run_tui():
                 self._debug_logger.debug("Interruzione richiesta dall'utente")
                 self._stop_requested = True
                 self._stop_event.set()
+                if self._process_stop_event is not None:
+                    self._process_stop_event.set()
                 self._append_log("[yellow]Interruzione richiesta...[/yellow]")
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -1273,15 +1452,12 @@ def run_tui():
                 self._stop_requested = False
 
         def _append_log(self, line: str, allow_markup: bool = True) -> None:
-            log = self.query_one("#log", RichLog)
+            note = self.query_one("#run_note", Static)
+            text = str(line)
             if allow_markup:
-                try:
-                    log.write(Text.from_markup(line))
-                    return
-                except Exception:
-                    # Fallback sicuro: mostra comunque il messaggio se il markup e invalido.
-                    pass
-            log.write(escape(str(line)))
+                # Convertiamo markup Rich in testo semplice per una nota compatta.
+                text = re.sub(r"\[[^\]]+\]", "", text)
+            note.update(f"Eventi run: {text}")
 
         def _estimate_urls(self, input_path: str):
             if not input_path:
@@ -1398,14 +1574,10 @@ def run_tui():
                 self._stop_event.clear()
                 self._stop_requested = False
                 self._set_running_ui(True)
+                self._process_stop_event = mp.Event()
                 progress = self.query_one("#progress", ProgressBar)
                 progress.update(total=1, progress=0)
-
-                log = self.query_one("#log", RichLog)
-                if hasattr(log, "clear"):
-                    log.clear()
-                else:
-                    self._append_log("[dim]Nuova esecuzione[/dim]")
+                self._append_log("Nuova esecuzione")
 
                 self.query_one("#status", Static).update("Validazione configurazione e avvio scraping...")
 
@@ -1417,9 +1589,15 @@ def run_tui():
                     "errors": 0,
                     "skipped": 0,
                 }
+                self._last_runtime_refresh_ts = 0.0
+                self._last_runtime_refresh_idx = 0
+                self._ui_backlog = 0
                 self._update_kpi()
 
                 args = settings_to_args(settings)
+                # In TUI lasciamo liberta totale sui worker; avvisiamo solo su valori alti.
+                if args.workers > 8:
+                    self._append_log("[yellow]Attenzione: con workers alti la UI puo diventare meno reattiva[/yellow]")
                 self._debug_logger.debug(
                     "Avvio worker: input=%s output=%s workers=%s",
                     args.input_file,
@@ -1427,25 +1605,47 @@ def run_tui():
                     args.workers,
                 )
 
-                def _on_event(payload: dict):
-                    # Strategia robusta cross-versione Textual: il worker push-a solo in coda.
-                    self._event_queue.put(payload)
+                def _enqueue_ui_event(payload: dict):
+                    if payload.get("type") != "result":
+                        self._control_queue.put(payload)
+                        return
 
-                def _run_worker():
                     try:
-                        self._debug_logger.debug("Thread worker partito")
-                        scrape_with_callbacks(args, _on_event, self._stop_event)
-                        self._debug_logger.debug("Thread worker terminato normalmente")
-                    except Exception as exc:
-                        self._debug_logger.exception("Errore nel thread worker")
-                        _on_event({"type": "error", "message": f"Errore worker: {exc}"})
+                        self._result_queue.put_nowait(payload)
+                    except queue.Full:
+                        with self._queue_state_lock:
+                            self._coalesced_result_event = payload
+                            self._dropped_result_events += 1
 
-                self._worker_thread = threading.Thread(
-                    target=_run_worker,
+                args_payload = vars(args).copy()
+                self._process_event_queue = mp.Queue(maxsize=2000)
+                self._scraper_process = mp.Process(
+                    target=_scrape_process_entry,
+                    args=(args_payload, self._process_stop_event, self._process_event_queue),
                     daemon=True,
                 )
-                self._worker_thread.start()
-                self._append_log("[cyan]Start ricevuto: preparo i worker...[/cyan]")
+                self._scraper_process.start()
+
+                def _bridge_events():
+                    self._debug_logger.debug("Bridge eventi processo partito")
+                    while True:
+                        if self._stop_event.is_set() and (not self._scraper_process or not self._scraper_process.is_alive()):
+                            break
+                        try:
+                            payload = self._process_event_queue.get(timeout=0.2)
+                            _enqueue_ui_event(payload)
+                        except queue.Empty:
+                            if self._scraper_process and not self._scraper_process.is_alive():
+                                break
+                            continue
+                        except Exception:
+                            if self._scraper_process and not self._scraper_process.is_alive():
+                                break
+                            continue
+                    self._debug_logger.debug("Bridge eventi processo terminato")
+
+                self._bridge_thread = threading.Thread(target=_bridge_events, daemon=True)
+                self._bridge_thread.start()
             except Exception as exc:
                 self._debug_logger.exception("Errore avvio run")
                 self.query_one("#status", Static).update(f"Errore avvio: {exc}")
@@ -1454,7 +1654,6 @@ def run_tui():
 
         def _handle_worker_event(self, payload: dict) -> None:
             kind = payload.get("type")
-            self._debug_logger.debug("Gestione evento: %s", kind)
 
             if kind == "error":
                 self._debug_logger.error("Evento errore: %s", payload.get("message"))
@@ -1473,11 +1672,7 @@ def run_tui():
                 self.query_one("#status", Static).update(
                     f"In esecuzione: {total} URL da analizzare ({skipped} saltati)"
                 )
-                self._append_log(
-                    "[bold cyan]Run avviato[/bold cyan] "
-                    f"| output={payload['run_dir']} | workers={payload['workers']} | input={payload['input_file']}"
-                    f" | error_log={payload.get('error_log', '-') }"
-                )
+                self._append_log("Run avviato")
                 return
 
             if kind == "result":
@@ -1485,16 +1680,21 @@ def run_tui():
                 total = payload["total"]
                 result = payload["result"]
                 self._stats["processed"] = idx
-                if result["status"] == "error":
-                    self._stats["errors"] += 1
-                elif result["status"] == "no_emails_found":
-                    self._stats["no_email"] += 1
-                elif result["status"] == "ok":
-                    self._stats["with_email"] += 1
-                self._update_kpi()
-                self.query_one("#progress", ProgressBar).update(progress=idx)
-                self.query_one("#status", Static).update(f"Completati {idx}/{total} URL")
-                self._append_log(_result_line(idx, total, result))
+                self._stats["total"] = total
+                payload_stats = payload.get("stats") or {}
+                if payload_stats:
+                    self._stats["with_email"] = payload_stats.get("with_email", self._stats["with_email"])
+                    self._stats["no_email"] = payload_stats.get("no_email", self._stats["no_email"])
+                    self._stats["errors"] = payload_stats.get("errors", self._stats["errors"])
+                else:
+                    # Fallback compatibile con eventi legacy senza contatori cumulativi.
+                    if result["status"] == "error":
+                        self._stats["errors"] += 1
+                    elif result["status"] == "no_emails_found":
+                        self._stats["no_email"] += 1
+                    elif result["status"] == "ok":
+                        self._stats["with_email"] += 1
+                # Modalita counter-only: nessun dettaglio per singolo risultato nel log live.
                 return
 
             if kind == "done":
@@ -1520,10 +1720,16 @@ def run_tui():
                 self.query_one("#status", Static).update(
                     f"{state} in {elapsed:.1f}s | con email={with_mail} | senza email={no_mail} | errori={errors}"
                 )
-                self._append_log(
-                    f"[green]Output salvati[/green] | {paths['json']} | {paths['all_emails']} | {paths['no_email']} | {paths['errors']}"
-                    f" | error_log={payload.get('error_log', '-') }"
-                )
+                done_parts = [
+                    str(paths["json"]),
+                    str(paths["all_emails"]),
+                    str(paths["no_email"]),
+                    str(paths["errors"]),
+                ]
+                done_error_log = payload.get("error_log")
+                if done_error_log:
+                    done_parts.append(f"log={done_error_log}")
+                self._append_log(f"[green]Output salvati[/green] | {' | '.join(done_parts)}")
                 self._debug_logger.debug(
                     "Run concluso: interrupted=%s elapsed=%.2fs with_email=%s no_email=%s errors=%s",
                     interrupted,
@@ -1533,7 +1739,10 @@ def run_tui():
                     errors,
                 )
                 self._set_running_ui(False)
-                self._worker_thread = None
+                self._bridge_thread = None
+                self._scraper_process = None
+                self._process_event_queue = None
+                self._process_stop_event = None
 
     app = ScraperTuiApp()
     app.run()
